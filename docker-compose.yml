@@ -1,0 +1,36 @@
+services:
+  api:
+    container_name: expense-api
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    env_file:
+      - .env
+      - .env.compose
+    ports:
+      - "8081:8081"
+    networks:
+      - data
+      - messaging
+      - observability
+    restart: unless-stopped
+
+# Service worker (outbox publisher) ditambahkan di sini bersama cmd/worker (M4).
+
+networks:
+  data:
+    external: true
+    name: data
+
+  messaging:
+    external: true
+    name: messaging
+
+  observability:
+    external: true
+    name: observability
