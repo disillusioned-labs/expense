@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/disillusioned-labs/expense/internal/handler"
+	"github.com/disillusioned-labs/platform/telemetry"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -60,7 +61,9 @@ func requestIDResponse(next http.Handler) http.Handler {
 			w.Header().Set("X-Request-ID", requestID)
 		}
 
-		next.ServeHTTP(w, r)
+		// Stamp the request id into the context so every log line inside the
+		// request carries it, not just the per-request summary line.
+		next.ServeHTTP(w, r.WithContext(telemetry.WithRequestID(r.Context(), requestID)))
 	})
 }
 
