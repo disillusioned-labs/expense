@@ -1,5 +1,5 @@
 // Package grpc serves expense's internal gRPC surface. Today that is the
-// MemberService (decision D2): identity calls expense before committing a
+// ExpenseService (decision D2): identity calls expense before committing a
 // member removal, because approval rules live in the expense database and
 // only expense can answer whether the member is still an active approver.
 package grpc
@@ -19,30 +19,30 @@ import (
 
 	"github.com/disillusioned-labs/expense/internal/service"
 	approvalservice "github.com/disillusioned-labs/expense/internal/service/approval"
-	memberpb "github.com/disillusioned-labs/platform/contract/member"
+	expensepb "github.com/disillusioned-labs/platform/contract/expense"
 )
 
 var tracer = otel.Tracer("handler/grpc")
 
-// MemberServer adapts the approval service to the MemberService proto.
-type MemberServer struct {
-	memberpb.UnimplementedMemberServiceServer
+// ExpenseServer adapts the approval service to the ExpenseService proto.
+type ExpenseServer struct {
+	expensepb.UnimplementedExpenseServiceServer
 	approvals approvalservice.ApprovalService
 	log       *slog.Logger
 }
 
-// NewMemberServer builds the MemberService gRPC handler.
-func NewMemberServer(approvals approvalservice.ApprovalService, log *slog.Logger) *MemberServer {
-	return &MemberServer{approvals: approvals, log: log}
+// NewExpenseServer builds the ExpenseService gRPC handler.
+func NewExpenseServer(approvals approvalservice.ApprovalService, log *slog.Logger) *ExpenseServer {
+	return &ExpenseServer{approvals: approvals, log: log}
 }
 
 // CheckApproverAssignments answers identity's pre-removal check: the caller
 // blocks (409 APPROVER_STILL_ASSIGNED) when has_active_rules is true.
-func (s *MemberServer) CheckApproverAssignments(
+func (s *ExpenseServer) CheckApproverAssignments(
 	ctx context.Context,
-	req *memberpb.CheckApproverAssignmentsRequest,
-) (*memberpb.CheckApproverAssignmentsResponse, error) {
-	ctx, span := tracer.Start(ctx, "MemberServer.CheckApproverAssignments")
+	req *expensepb.CheckApproverAssignmentsRequest,
+) (*expensepb.CheckApproverAssignmentsResponse, error) {
+	ctx, span := tracer.Start(ctx, "ExpenseServer.CheckApproverAssignments")
 	defer span.End()
 
 	orgID, userID, err := parseOrgUser(req.GetOrganizationId(), req.GetUserId())
@@ -55,9 +55,9 @@ func (s *MemberServer) CheckApproverAssignments(
 		return nil, writeServiceErr(ctx, err)
 	}
 
-	pbRules := make([]*memberpb.ApprovalRule, 0, len(rules))
+	pbRules := make([]*expensepb.ApprovalRule, 0, len(rules))
 	for _, r := range rules {
-		ref := &memberpb.ApprovalRule{
+		ref := &expensepb.ApprovalRule{
 			Id:   r.ID.String(),
 			Step: int32(r.Step),
 		}
@@ -68,7 +68,7 @@ func (s *MemberServer) CheckApproverAssignments(
 	}
 
 	span.SetAttributes(attribute.Bool("has_active_rules", hasRules), attribute.Int("rule_count", len(pbRules)))
-	return &memberpb.CheckApproverAssignmentsResponse{
+	return &expensepb.CheckApproverAssignmentsResponse{
 		HasActiveRules: hasRules,
 		Rules:          pbRules,
 	}, nil
@@ -77,11 +77,11 @@ func (s *MemberServer) CheckApproverAssignments(
 // ReassignApproverRules moves the member's rules to the replacement the admin
 // picked, then identity commits the removal. Fails closed: if the reassign
 // does not happen, identity never removes the member.
-func (s *MemberServer) ReassignApproverRules(
+func (s *ExpenseServer) ReassignApproverRules(
 	ctx context.Context,
-	req *memberpb.ReassignApproverRulesRequest,
-) (*memberpb.ReassignApproverRulesResponse, error) {
-	ctx, span := tracer.Start(ctx, "MemberServer.ReassignApproverRules")
+	req *expensepb.ReassignApproverRulesRequest,
+) (*expensepb.ReassignApproverRulesResponse, error) {
+	ctx, span := tracer.Start(ctx, "ExpenseServer.ReassignApproverRules")
 	defer span.End()
 
 	orgID, fromID, err := parseOrgUser(req.GetOrganizationId(), req.GetFromUserId())
@@ -101,7 +101,7 @@ func (s *MemberServer) ReassignApproverRules(
 	if err != nil {
 		return nil, writeServiceErr(ctx, err)
 	}
-	return &memberpb.ReassignApproverRulesResponse{Reassigned: reassigned}, nil
+	return &expensepb.ReassignApproverRulesResponse{Reassigned: reassigned}, nil
 }
 
 func parseOrgUser(orgIDStr, userIDStr string) (uuid.UUID, uuid.UUID, error) {

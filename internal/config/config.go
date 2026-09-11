@@ -40,7 +40,7 @@ type Config struct {
 	Auth       AuthConfig                      `mapstructure:"auth"`
 	Storage    StorageConfig                   `mapstructure:"storage"`
 	GRPCClient platformconfig.GRPCClientConfig `mapstructure:"grpc_client"`
-	// GRPC is the internal gRPC server surface (decision D2, MemberService).
+	// GRPC is the internal gRPC server surface (decision D2, ExpenseService).
 	GRPC   platformconfig.GRPCConfig `mapstructure:"grpc"`
 	Remind ReminderConfig            `mapstructure:"reminder"`
 }
@@ -275,7 +275,7 @@ func (c *Config) validate() error {
 		errs = append(errs, err)
 	}
 
-	// gRPC server validation (internal MemberService surface, D2).
+	// gRPC server validation (internal ExpenseService surface, D2).
 	if err := platformconfig.ValidateGRPC(&c.GRPC); err != nil {
 		errs = append(errs, err)
 	}
@@ -394,7 +394,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("grpc_client.tls.server_name", "")
 	v.SetDefault("grpc_client.tls.mutual_tls", false)
 
-	// gRPC server (internal MemberService surface, D2). 9091 keeps it clear
+	// gRPC server (internal ExpenseService surface, D2). 9091 keeps it clear
 	// of identity's gRPC on 9090 and the Kafka broker on 9092.
 	v.SetDefault("grpc.server_port", 9091)
 	v.SetDefault("grpc.max_recv_msg_size", 4*1024*1024)

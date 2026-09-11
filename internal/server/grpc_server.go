@@ -9,19 +9,19 @@ import (
 	"github.com/disillusioned-labs/expense/internal/config"
 	grpchandler "github.com/disillusioned-labs/expense/internal/handler/grpc"
 	approvalservice "github.com/disillusioned-labs/expense/internal/service/approval"
-	memberpb "github.com/disillusioned-labs/platform/contract/member"
+	expensepb "github.com/disillusioned-labs/platform/contract/expense"
 	platformgrpc "github.com/disillusioned-labs/platform/grpc"
 )
 
 // GRPCServer assembles the expense gRPC listener. It serves only the
-// internal MemberService (decision D2); the public surface stays HTTP.
+// internal ExpenseService (decision D2); the public surface stays HTTP.
 type GRPCServer struct {
 	grpc *platformgrpc.Server
 	log  *slog.Logger
 	cfg  *config.Config
 }
 
-// NewGRPC builds the gRPC server and registers the MemberService handler.
+// NewGRPC builds the gRPC server and registers the ExpenseService handler.
 func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.ApprovalService) (*GRPCServer, error) {
 	grpcServer, err := platformgrpc.NewServer(
 		platformgrpc.WithMaxRecvMsgSize(cfg.GRPC.MaxRecvMsgSize),
@@ -34,8 +34,8 @@ func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.App
 		return nil, fmt.Errorf("grpc server: %w", err)
 	}
 
-	memberServer := grpchandler.NewMemberServer(approvals, log)
-	memberpb.RegisterMemberServiceServer(grpcServer.GRPC(), memberServer)
+	expenseServer := grpchandler.NewExpenseServer(approvals, log)
+	expensepb.RegisterExpenseServiceServer(grpcServer.GRPC(), expenseServer)
 
 	return &GRPCServer{grpc: grpcServer, log: log, cfg: cfg}, nil
 }

@@ -26,7 +26,7 @@ import (
 
 const grpcOtelFlushTimeout = 5 * time.Second
 
-// RunGRPC boots the internal gRPC server (decision D2, MemberService) with
+// RunGRPC boots the internal gRPC server (decision D2, ExpenseService) with
 // the given configuration and blocks until the process is told to stop. The
 // caller owns loading and validating cfg (see cmd/grpc).
 func RunGRPC(cfg *config.Config) error {
@@ -93,7 +93,7 @@ func RunGRPC(cfg *config.Config) error {
 	// -------------------------------------------------------------------------
 	// Dependencies
 	// -------------------------------------------------------------------------
-	// The MemberService needs identity live: ReassignRules validates the
+	// The ExpenseService needs identity live: ReassignRules validates the
 	// replacement approver is still an active member before moving the rules.
 	identityClient, closeIdentity, err := newIdentityClient(ctx, cfg, log)
 	if err != nil {
