@@ -1,13 +1,14 @@
 -- +goose Up
 CREATE TABLE projects
 (
-    id              UUID PRIMARY KEY DEFAULT uuidv7(),
-    organization_id UUID         NOT NULL, -- referensi logis ke identity, bukan FK fisik
+    id              UUID         PRIMARY KEY DEFAULT uuidv7(),
+    organization_id UUID         NOT NULL,
     name            VARCHAR(255) NOT NULL,
-    created_by      UUID         NOT NULL, -- referensi logis
+    created_by      UUID         NOT NULL,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    deleted_at      TIMESTAMPTZ  NULL
+    deleted_at      TIMESTAMPTZ  NULL,
+    archived_at     TIMESTAMPTZ  NULL
 );
 
 CREATE INDEX ix_projects_org

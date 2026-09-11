@@ -20,22 +20,78 @@ import (
 	"strings"
 	"time"
 
-	platformconfig "github.com/disillusioned-labs/platform/config"
 	"github.com/spf13/viper"
+
+	platformconfig "github.com/disillusioned-labs/platform/config"
 )
 
 // Config is the root of all application settings, one field per subsystem.
 type Config struct {
-	Service   platformconfig.ServiceConfig   `mapstructure:"service"`
-	Server    platformconfig.ServerConfig    `mapstructure:"server"`
-	Pprof     platformconfig.PprofConfig     `mapstructure:"pprof"`
-	Postgres  platformconfig.PostgresConfig  `mapstructure:"postgres"`
-	Redis     platformconfig.RedisConfig     `mapstructure:"redis"`
-	Cache     platformconfig.CacheConfig     `mapstructure:"cache"`
-	Kafka     platformconfig.KafkaConfig     `mapstructure:"kafka"`
-	OTel      platformconfig.OTelConfig      `mapstructure:"otel"`
-	Log       platformconfig.LogConfig       `mapstructure:"log"`
-	RateLimit platformconfig.RateLimitConfig `mapstructure:"ratelimit"`
+	Service    platformconfig.ServiceConfig    `mapstructure:"service"`
+	Server     platformconfig.ServerConfig     `mapstructure:"server"`
+	Pprof      platformconfig.PprofConfig      `mapstructure:"pprof"`
+	Postgres   platformconfig.PostgresConfig   `mapstructure:"postgres"`
+	Redis      platformconfig.RedisConfig      `mapstructure:"redis"`
+	Cache      platformconfig.CacheConfig      `mapstructure:"cache"`
+	Kafka      platformconfig.KafkaConfig      `mapstructure:"kafka"`
+	OTel       platformconfig.OTelConfig       `mapstructure:"otel"`
+	Log        platformconfig.LogConfig        `mapstructure:"log"`
+	RateLimit  platformconfig.RateLimitConfig  `mapstructure:"ratelimit"`
+	Auth       AuthConfig                      `mapstructure:"auth"`
+	Storage    StorageConfig                   `mapstructure:"storage"`
+	GRPCClient platformconfig.GRPCClientConfig `mapstructure:"grpc_client"`
+	// GRPC is the internal gRPC server surface (decision D2, MemberService).
+	GRPC   platformconfig.GRPCConfig `mapstructure:"grpc"`
+	Remind ReminderConfig            `mapstructure:"reminder"`
+}
+
+// ReminderConfig schedules the approval-stall nag: an active approval step
+// older than ThresholdDays gets one reminder email per Interval tick.
+// Visibility only - it never changes who may decide.
+type ReminderConfig struct {
+	Enabled       bool          `mapstructure:"enabled"`
+	Interval      time.Duration `mapstructure:"interval"`
+	ThresholdDays int           `mapstructure:"threshold_days"`
+	BatchSize     int           `mapstructure:"batch_size"`
+}
+
+// StorageConfig selects the document store engine and its settings. The
+// default engine is the local dev filesystem; s3 points at any S3-compatible
+// object storage via platform/s3.
+type StorageConfig struct {
+	S3 StorageS3Config `mapstructure:"s3"`
+}
+
+type StorageS3Config struct {
+	// Endpoint is the S3-compatible API endpoint (MinIO for local dev).
+	// Empty means real AWS.
+	Endpoint string `mapstructure:"endpoint"`
+	// Region is the signing region (a placeholder such as us-east-1 works
+	// for MinIO). Always required when engine=s3.
+	Region string `mapstructure:"region"`
+	// Static credentials for S3-compatible servers. Leave AccessKeyID empty
+	// to use the default AWS credential chain (env/IMDSv2).
+	AccessKeyID     string `mapstructure:"access_key_id"`
+	SecretAccessKey string `mapstructure:"secret_access_key"`
+	SessionToken    string `mapstructure:"session_token"`
+	// UsePathStyle addresses buckets as endpoint/bucket/key - required for MinIO.
+	UsePathStyle bool `mapstructure:"use_path_style"`
+	// Bucket is the single bucket expense stores documents in.
+	Bucket string `mapstructure:"bucket"`
+	// PresignTTL is the lifetime of file_url presigned GETs.
+	PresignTTL string `mapstructure:"presign_ttl"`
+	// PingOnBoot fails the boot when the bucket is unreachable - upload
+	// cannot degrade around object storage.
+	PingOnBoot bool `mapstructure:"ping_on_boot"`
+}
+
+// AuthConfig points at identity's JWKS: expense never trusts a token without
+// verifying it itself (zero trust), and never calls identity on the hot path.
+type AuthConfig struct {
+	// Issuer is the "iss" claim stamped by identity.
+	Issuer string `mapstructure:"issuer"`
+	// JWKSURL is identity's public key set endpoint.
+	JWKSURL string `mapstructure:"jwks_url"`
 }
 
 // DotEnvFile is the optional local overrides file, loaded from the working
@@ -76,6 +132,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 	cfg.Kafka.Brokers = platformconfig.NormalizeKafkaBrokers(cfg.Kafka.Brokers)
+	cfg.Kafka.Consumer.Topics = platformconfig.NormalizeKafkaTopics(cfg.Kafka.Consumer.Topics)
 	cfg.Service.InstanceID = platformconfig.InstanceID()
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
@@ -186,6 +243,13 @@ func (c *Config) validate() error {
 		errs = append(errs, err)
 	}
 
+	if c.Auth.Issuer == "" {
+		errs = append(errs, fmt.Errorf("auth.issuer must not be empty"))
+	}
+	if c.Auth.JWKSURL == "" {
+		errs = append(errs, fmt.Errorf("auth.jwks_url must not be empty"))
+	}
+
 	// RateLimit validation.
 	if c.RateLimit.Enabled {
 		if c.RateLimit.Requests <= 0 {
@@ -193,6 +257,42 @@ func (c *Config) validate() error {
 		}
 		if c.RateLimit.Window <= 0 {
 			fail("ratelimit.window must be > 0 when ratelimit.enabled, got %s", c.RateLimit.Window)
+		}
+	}
+
+	if c.Storage.S3.Region == "" {
+		fail("storage.s3.region must not be empty when storage.engine=s3 (us-east-1 works for MinIO)")
+	}
+	if c.Storage.S3.Bucket == "" {
+		fail("storage.s3.bucket must not be empty when storage.engine=s3")
+	}
+	if (c.Storage.S3.AccessKeyID == "") != (c.Storage.S3.SecretAccessKey == "") {
+		fail("storage.s3.access_key_id and secret_access_key must be both set or both empty (empty = default AWS credential chain)")
+	}
+
+	// gRPC client validation.
+	if err := platformconfig.ValidateGRPCClient(&c.GRPCClient); err != nil {
+		errs = append(errs, err)
+	}
+
+	// gRPC server validation (internal MemberService surface, D2).
+	if err := platformconfig.ValidateGRPC(&c.GRPC); err != nil {
+		errs = append(errs, err)
+	}
+	if c.GRPC.ServerPort == c.Server.Port {
+		fail("grpc.server_port (%d) must differ from server.port", c.GRPC.ServerPort)
+	}
+
+	// Reminder worker validation.
+	if c.Remind.Enabled {
+		if c.Remind.Interval <= 0 {
+			fail("reminder.interval must be > 0 when reminder.enabled, got %s", c.Remind.Interval)
+		}
+		if c.Remind.ThresholdDays < 1 {
+			fail("reminder.threshold_days must be >= 1 when reminder.enabled, got %d", c.Remind.ThresholdDays)
+		}
+		if c.Remind.BatchSize < 1 {
+			fail("reminder.batch_size must be >= 1 when reminder.enabled, got %d", c.Remind.BatchSize)
 		}
 	}
 
@@ -236,6 +336,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("kafka.ping_timeout", "5s")
 	v.SetDefault("kafka.producer.record_retries", int64(5))
 	v.SetDefault("kafka.producer.record_delivery_timeout", "30s")
+	// Consumer defaults are producer-only: the group stays empty unless the
+	// worker is explicitly pointed at a topic, and the API binary never
+	// consumes regardless of what is set here.
+	v.SetDefault("kafka.consumer.group", "")
+	v.SetDefault("kafka.consumer.topics", "")
+	v.SetDefault("kafka.consumer.dlq_topic", "")
+	v.SetDefault("kafka.consumer.retry.max_attempts", 3)
+	v.SetDefault("kafka.consumer.retry.initial_delay", "200ms")
+	v.SetDefault("kafka.consumer.retry.max_delay", "5s")
 
 	v.SetDefault("otel.sdk_disabled", false)
 	v.SetDefault("otel.traces_exporter", platformconfig.OTelExporterOTLP)
@@ -256,4 +365,53 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ratelimit.enabled", true)
 	v.SetDefault("ratelimit.requests", 40)
 	v.SetDefault("ratelimit.window", "1s")
+
+	v.SetDefault("auth.issuer", "identity")
+	v.SetDefault("auth.jwks_url", "http://localhost:8080/.well-known/jwks.json")
+
+	v.SetDefault("storage.engine", "local")
+	v.SetDefault("storage.s3.endpoint", "")
+	v.SetDefault("storage.s3.region", "")
+	v.SetDefault("storage.s3.access_key_id", "")
+	v.SetDefault("storage.s3.secret_access_key", "")
+	v.SetDefault("storage.s3.session_token", "")
+	v.SetDefault("storage.s3.use_path_style", false)
+	v.SetDefault("storage.s3.bucket", "")
+	v.SetDefault("storage.s3.presign_ttl", "15m")
+	// Fail-fast is the production-safe default: upload cannot degrade
+	// around an unreachable object store.
+	v.SetDefault("storage.s3.ping_on_boot", true)
+
+	// gRPC client (expense → identity).
+	v.SetDefault("grpc_client.target", "localhost:9090")
+	v.SetDefault("grpc_client.timeout", "50ms")
+	v.SetDefault("grpc_client.max_recv_msg_size", 4194304)
+	v.SetDefault("grpc_client.max_send_msg_size", 4194304)
+	v.SetDefault("grpc_client.tls.enabled", false)
+	v.SetDefault("grpc_client.tls.ca_file", "")
+	v.SetDefault("grpc_client.tls.cert_file", "")
+	v.SetDefault("grpc_client.tls.key_file", "")
+	v.SetDefault("grpc_client.tls.server_name", "")
+	v.SetDefault("grpc_client.tls.mutual_tls", false)
+
+	// gRPC server (internal MemberService surface, D2). 9091 keeps it clear
+	// of identity's gRPC on 9090 and the Kafka broker on 9092.
+	v.SetDefault("grpc.server_port", 9091)
+	v.SetDefault("grpc.max_recv_msg_size", 4*1024*1024)
+	v.SetDefault("grpc.max_send_msg_size", 4*1024*1024)
+	v.SetDefault("grpc.max_header_size", 8*1024)
+	v.SetDefault("grpc.unary_timeout", "10s")
+	v.SetDefault("grpc.tls.enabled", false)
+	v.SetDefault("grpc.tls.ca_file", "")
+	v.SetDefault("grpc.tls.cert_file", "")
+	v.SetDefault("grpc.tls.key_file", "")
+	v.SetDefault("grpc.tls.server_name", "")
+	v.SetDefault("grpc.tls.mutual_tls", false)
+
+	// Approval-stall reminders (visibility only). Off by default: enabling
+	// them is a deployment's explicit choice.
+	v.SetDefault("reminder.enabled", false)
+	v.SetDefault("reminder.interval", "24h")
+	v.SetDefault("reminder.threshold_days", 2)
+	v.SetDefault("reminder.batch_size", 100)
 }

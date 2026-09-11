@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"github.com/disillusioned-labs/expense/internal/config"
+	"github.com/disillusioned-labs/expense/internal/constant"
 	"github.com/disillusioned-labs/expense/internal/server"
 	"github.com/disillusioned-labs/platform/cache"
 	platformconfig "github.com/disillusioned-labs/platform/config"
 	"github.com/disillusioned-labs/platform/postgres"
 	"github.com/disillusioned-labs/platform/redis"
+	s3 "github.com/disillusioned-labs/platform/s3"
 	"github.com/disillusioned-labs/platform/telemetry"
 
 	migrations "github.com/disillusioned-labs/expense/db/migrations"
@@ -114,7 +116,40 @@ func RunAPI(cfg *config.Config) error {
 	defer closeRedis()
 	redisRequired := cfg.Redis.Mode == platformconfig.RedisModeRequired
 
-	deps, err := buildDeps(pool, rdb, redisRequired, svcCache, log)
+	// -------------------------------------------------------------------------
+	// Storage
+	// -------------------------------------------------------------------------
+	s3Config := s3.Config{
+		Endpoint:        cfg.Storage.S3.Endpoint,
+		Region:          cfg.Storage.S3.Region,
+		AccessKeyID:     cfg.Storage.S3.AccessKeyID,
+		SecretAccessKey: cfg.Storage.S3.SecretAccessKey,
+		SessionToken:    cfg.Storage.S3.SessionToken,
+		UsePathStyle:    cfg.Storage.S3.UsePathStyle,
+		BucketAllowlist: []string{constant.DocumentBucket},
+	}
+	s3Client, err := s3.New(ctx, s3Config)
+	if err != nil {
+		return fmt.Errorf("build s3 storage: %w", err)
+	}
+
+	if cfg.Storage.S3.PingOnBoot {
+		if err := s3Client.Ping(ctx, ""); err != nil {
+			return fmt.Errorf("ping s3: %w", err)
+		}
+	}
+	log.Info("s3 storage ready", "endpoint", cfg.Storage.S3.Endpoint, "bucket", cfg.Storage.S3.Bucket)
+
+	// -------------------------------------------------------------------------
+	// Identity gRPC client
+	// -------------------------------------------------------------------------
+	identityClient, closeIdentity, err := newIdentityClient(ctx, cfg, log)
+	if err != nil {
+		return fmt.Errorf("connect identity gRPC: %w", err)
+	}
+	defer closeIdentity()
+
+	deps, err := buildDeps(ctx, pool, rdb, redisRequired, svcCache, s3Client, identityClient, cfg, log)
 	if err != nil {
 		return fmt.Errorf("build dependencies: %w", err)
 	}

@@ -10,7 +10,13 @@ import (
 
 	"github.com/disillusioned-labs/expense/internal/config"
 	"github.com/disillusioned-labs/expense/internal/handler"
+	approvalhandler "github.com/disillusioned-labs/expense/internal/handler/approval"
+	documenthandler "github.com/disillusioned-labs/expense/internal/handler/document"
 	"github.com/disillusioned-labs/expense/internal/handler/health"
+	projecthandler "github.com/disillusioned-labs/expense/internal/handler/project"
+	rolehandler "github.com/disillusioned-labs/expense/internal/handler/role"
+	transactionhandler "github.com/disillusioned-labs/expense/internal/handler/transaction"
+	"github.com/disillusioned-labs/platform/authkit"
 	"github.com/disillusioned-labs/platform/cache"
 
 	"github.com/go-chi/chi/v5"
@@ -51,6 +57,14 @@ type Deps struct {
 	Redis         *goredis.Client
 	RedisRequired bool
 	Cache         cache.Cache
+	Verifier      *authkit.Verifier
+	AuthErrorHandler authkit.HTTPErrorHandler
+
+	RoleHandler        *rolehandler.Handler
+	ProjectHandler     *projecthandler.Handler
+	TransactionHandler *transactionhandler.Handler
+	DocumentHandler    *documenthandler.Handler
+	ApprovalHandler    *approvalhandler.Handler
 }
 
 // New assembles the router - middleware chain and probes, plus the /api/v1
@@ -114,8 +128,17 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 			))
 		}
 
-		// Resource routes (project, transaction, document, approval) mount
-		// here.
+		// Zero trust: setiap request API diverifikasi sendiri terhadap JWKS
+		// identity. Tidak ada endpoint API publik - probe hidup di luar /api/v1.
+		r.Use(func(next http.Handler) http.Handler {
+			return deps.Verifier.Middleware(next, deps.AuthErrorHandler)
+		})
+
+		deps.RoleHandler.ProtectedRoutes(r)
+		deps.ProjectHandler.ProtectedRoutes(r)
+		deps.TransactionHandler.ProtectedRoutes(r)
+		deps.DocumentHandler.ProtectedRoutes(r)
+		deps.ApprovalHandler.ProtectedRoutes(r)
 	})
 
 	// otelhttp wraps the whole router: creates the server span, extracts

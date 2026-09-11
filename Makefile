@@ -1,4 +1,4 @@
-.PHONY: run build test test-integration lint tidy vuln sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status docker-up docker-down docker-build help
+.PHONY: run run-worker run-consumer build test test-integration lint tidy vuln sqlc sqlc-diff migrate-new migrate-up migrate-down migrate-status docker-up docker-down docker-build help
 
 # Tool versions are pinned so local runs and CI can never drift. Bump here and
 # in .github/workflows/ci.yml together. They are kept out of go.mod on purpose:
@@ -27,8 +27,16 @@ LDFLAGS := -s -w 	-X github.com/disillusioned-labs/expense/internal/app.version=
 run: ## Run the API locally
 	go run ./cmd/api
 
-build: ## Build the API binary into ./bin
+run-worker: ## Run the outbox publisher locally
+	go run ./cmd/worker
+
+run-consumer: ## Run the OCR consumer locally
+	go run ./cmd/consumer
+
+build: ## Build all binaries (api, worker, consumer) into ./bin
 	go build -trimpath -ldflags="$(LDFLAGS)" -o bin/api ./cmd/api
+	go build -trimpath -ldflags="$(LDFLAGS)" -o bin/worker ./cmd/worker
+	go build -trimpath -ldflags="$(LDFLAGS)" -o bin/consumer ./cmd/consumer
 
 test: ## Run unit tests with race detector
 	go test -race ./...
