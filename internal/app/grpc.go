@@ -93,8 +93,6 @@ func RunGRPC(cfg *config.Config) error {
 	// -------------------------------------------------------------------------
 	// Dependencies
 	// -------------------------------------------------------------------------
-	// The ExpenseService needs identity live: ReassignRules validates the
-	// replacement approver is still an active member before moving the rules.
 	identityClient, closeIdentity, err := newIdentityClient(ctx, cfg, log)
 	if err != nil {
 		return err

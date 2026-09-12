@@ -31,7 +31,6 @@ type ExpenseServer struct {
 	log       *slog.Logger
 }
 
-// NewExpenseServer builds the ExpenseService gRPC handler.
 func NewExpenseServer(approvals approvalservice.ApprovalService, log *slog.Logger) *ExpenseServer {
 	return &ExpenseServer{approvals: approvals, log: log}
 }

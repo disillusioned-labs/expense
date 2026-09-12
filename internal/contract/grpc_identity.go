@@ -22,7 +22,6 @@ type grpcIdentityClient struct {
 	log    *slog.Logger
 }
 
-// NewGRPCIdentityClient creates an IdentityClient backed by a gRPC connection.
 func NewGRPCIdentityClient(conn *platformgrpc.Client, log *slog.Logger) IdentityClient {
 	return &grpcIdentityClient{
 		client: identitypb.NewIdentityServiceClient(conn.Conn()),

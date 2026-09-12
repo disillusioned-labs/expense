@@ -27,7 +27,6 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// Server wraps the http.Server with the assembled router and logger.
 type Server struct {
 	http   *http.Server
 	log    *slog.Logger
