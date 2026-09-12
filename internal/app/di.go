@@ -39,6 +39,7 @@ func buildDeps(
 	svcCache cache.Cache,
 	storage *s3.Client,
 	identityClient contract.IdentityClient,
+	ocrSubmitter ocr.Submitter,
 	cfg *config.Config,
 	log *slog.Logger,
 ) (server.Deps, error) {
@@ -63,8 +64,6 @@ func buildDeps(
 
 	transactionSvc := transactionservice.NewTransactionService(repo, authorizer, storage, identityClient, log)
 
-	// TODO: wire the real ocr-gateway submitter.
-	ocrSubmitter := ocr.NewNoopSubmitter(log)
 	documentSvc := documentservice.NewDocumentService(repo, authorizer, storage, ocrSubmitter, identityClient, log)
 
 	approvalSvc := approvalservice.NewApprovalService(repo, authorizer, identityClient, log)

@@ -19,7 +19,9 @@ type SubmitInput struct {
 	DeclaredMime   string
 }
 
-// TODO: call ocr-gateway over gRPC (Kontrak A) once the repo exists.
+// noopSubmitter is the fallback when OCR_GATEWAY_TARGET is empty: submits log
+// and return, documents stay pending OCR. The gRPC Kontrak A submitter lives
+// in internal/contract (NewGRPCOcrGateway) and is selected in app/grpc_client.go.
 type noopSubmitter struct{ log *slog.Logger }
 
 func NewNoopSubmitter(log *slog.Logger) Submitter {
@@ -28,7 +30,7 @@ func NewNoopSubmitter(log *slog.Logger) Submitter {
 
 func (s *noopSubmitter) SubmitDocument(ctx context.Context, in SubmitInput) error {
 	s.log.WarnContext(ctx,
-		"TODO: ocr-gateway not wired; document stays pending OCR",
+		"OCR gateway not configured (OCR_GATEWAY_TARGET empty); document stays pending OCR",
 		"document_ref", in.ExternalRef,
 		"storage_path", in.StoragePath,
 	)

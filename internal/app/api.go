@@ -149,7 +149,13 @@ func RunAPI(cfg *config.Config) error {
 	}
 	defer closeIdentity()
 
-	deps, err := buildDeps(ctx, pool, rdb, redisRequired, svcCache, s3Client, identityClient, cfg, log)
+	ocrSubmitter, closeOcr, err := newOcrGatewaySubmitter(ctx, cfg, log)
+	if err != nil {
+		return fmt.Errorf("connect ocr-gateway: %w", err)
+	}
+	defer closeOcr()
+
+	deps, err := buildDeps(ctx, pool, rdb, redisRequired, svcCache, s3Client, identityClient, ocrSubmitter, cfg, log)
 	if err != nil {
 		return fmt.Errorf("build dependencies: %w", err)
 	}

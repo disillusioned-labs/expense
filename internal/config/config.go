@@ -43,6 +43,17 @@ type Config struct {
 	// GRPC is the internal gRPC server surface (decision D2, ExpenseService).
 	GRPC   platformconfig.GRPCConfig `mapstructure:"grpc"`
 	Remind ReminderConfig            `mapstructure:"reminder"`
+	Ocr    OcrConfig                 `mapstructure:"ocr"`
+}
+
+// OcrConfig selects how documents reach the OCR pipeline. An empty
+// GatewayTarget keeps the noop submitter (documents stay pending OCR); a set
+// target switches to the ocr-gateway's Kontrak A gRPC surface.
+type OcrConfig struct {
+	// GatewayTarget is the ocr-gateway gRPC address (ocr.gateway.v1). Empty
+	// means OCR integration is off: submits log and return, no error - a
+	// missing gateway must not fail an upload.
+	GatewayTarget string `mapstructure:"gateway_target"`
 }
 
 // ReminderConfig schedules the approval-stall nag: an active approval step
@@ -414,4 +425,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("reminder.interval", "24h")
 	v.SetDefault("reminder.threshold_days", 2)
 	v.SetDefault("reminder.batch_size", 100)
+
+	// OCR submitter. Empty target = noop (documents stay pending OCR), so a
+	// deployment without the OCR pipeline never fails an upload.
+	v.SetDefault("ocr.gateway_target", "")
 }
