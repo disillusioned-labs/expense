@@ -21,15 +21,29 @@ type GRPCServer struct {
 	cfg  *config.Config
 }
 
-// NewGRPC builds the gRPC server and registers the ExpenseService handler.
 func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.ApprovalService) (*GRPCServer, error) {
-	grpcServer, err := platformgrpc.NewServer(
+	opts := []platformgrpc.Option{
 		platformgrpc.WithMaxRecvMsgSize(cfg.GRPC.MaxRecvMsgSize),
 		platformgrpc.WithMaxSendMsgSize(cfg.GRPC.MaxSendMsgSize),
 		platformgrpc.WithMaxHeaderSize(cfg.GRPC.MaxHeaderSize),
 		platformgrpc.WithLogger(log),
 		platformgrpc.WithUnaryServerInterceptor(platformgrpc.UnaryRequestIDServer(log)),
-	)
+	}
+	if cfg.GRPC.TLS.Enabled {
+		tlsConfig, err := platformgrpc.NewTLSConfig(
+			cfg.GRPC.TLS.CAFile,
+			cfg.GRPC.TLS.CertFile,
+			cfg.GRPC.TLS.KeyFile,
+			cfg.GRPC.TLS.ServerName,
+			cfg.GRPC.TLS.MutualTLS,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("build grpc server TLS config: %w", err)
+		}
+		opts = append(opts, platformgrpc.WithTLS(tlsConfig))
+	}
+
+	grpcServer, err := platformgrpc.NewServer(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("grpc server: %w", err)
 	}
