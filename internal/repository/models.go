@@ -66,6 +66,7 @@ type Document struct {
 	UploadedByName  string             `json:"uploaded_by_name"`
 	UploadedByEmail string             `json:"uploaded_by_email"`
 	UploadedByRole  string             `json:"uploaded_by_role"`
+	OcrDocumentID   *uuid.UUID         `json:"ocr_document_id"`
 }
 
 type OutboxEvent struct {

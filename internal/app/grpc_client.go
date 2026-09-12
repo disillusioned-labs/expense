@@ -53,6 +53,17 @@ func newOcrGatewaySubmitter(ctx context.Context, cfg *config.Config, log *slog.L
 		return ocr.NewNoopSubmitter(log), func() {}, nil
 	}
 
+	gateway, cleanup, err := newOcrGateway(ctx, cfg, log)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return gateway, cleanup, nil
+}
+
+// newOcrGateway returns the concrete gateway adapter, whose submit and status
+// surfaces share one connection.
+func newOcrGateway(ctx context.Context, cfg *config.Config, log *slog.Logger) (*contract.OcrGateway, func(), error) {
 	opts := []platformgrpc.Option{
 		platformgrpc.WithUnaryTimeout(cfg.GRPCClient.Timeout),
 		platformgrpc.WithMaxRecvMsgSize(cfg.GRPCClient.MaxRecvMsgSize),
@@ -78,5 +89,5 @@ func newOcrGatewaySubmitter(ctx context.Context, cfg *config.Config, log *slog.L
 		return nil, nil, fmt.Errorf("create ocr-gateway gRPC client: %w", err)
 	}
 
-	return contract.NewGRPCOcrGateway(client, log), func() { _ = client.Close() }, nil
+	return contract.NewOcrGateway(client, log), func() { _ = client.Close() }, nil
 }

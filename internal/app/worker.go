@@ -11,6 +11,7 @@ import (
 
 	"github.com/disillusioned-labs/expense/internal/config"
 	"github.com/disillusioned-labs/expense/internal/repository"
+	ocrconsumer "github.com/disillusioned-labs/expense/internal/service/ocrconsumer"
 	"github.com/disillusioned-labs/expense/internal/service/outbox"
 	reminderservice "github.com/disillusioned-labs/expense/internal/service/reminder"
 	"github.com/disillusioned-labs/platform/kafka"
@@ -119,6 +120,39 @@ func RunWorker(cfg *config.Config) error {
 						log.Error("approval reminder tick failed", "error", err)
 					} else if sent > 0 {
 						log.Info("approval reminders sent", "count", sent)
+					}
+				}
+			}
+		})
+	}
+
+	// The OCR sweep reconciles documents whose routed event never arrived;
+	// it needs the gateway's status surface, so it only runs when the
+	// gateway is configured.
+	if cfg.Ocr.GatewayTarget != "" {
+		gateway, closeGateway, err := newOcrGateway(ctx, cfg, log)
+		if err != nil {
+			return err
+		}
+		defer closeGateway()
+
+		sweeper := ocrconsumer.NewSweeper(repo, gateway, log)
+
+		g.Go(func() error {
+			ticker := time.NewTicker(cfg.Ocr.SweepInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return nil
+				case <-ticker.C:
+					// A failed tick is logged, not fatal: the sweep is a
+					// safety net, never on the critical path.
+					swept, err := sweeper.SweepStale(runCtx, cfg.Ocr.SweepAfter, cfg.Ocr.SweepBatch)
+					if err != nil {
+						log.Error("ocr sweep tick failed", "error", err)
+					} else if swept > 0 {
+						log.Info("ocr sweep resolved stale documents", "count", swept)
 					}
 				}
 			}

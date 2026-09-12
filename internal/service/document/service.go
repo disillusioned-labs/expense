@@ -270,7 +270,7 @@ func (s *documentService) upload(ctx context.Context, actor authz.Actor, project
 		return Document{}, err
 	}
 
-	if err := s.ocr.SubmitDocument(ctx, ocr.SubmitInput{
+	ocrDocID, submitErr := s.ocr.SubmitDocument(ctx, ocr.SubmitInput{
 		IdempotencyKey: created.ID.String(),
 		ExternalRef:    created.ID.String(),
 		DocType:        "receipt",
@@ -278,8 +278,21 @@ func (s *documentService) upload(ctx context.Context, actor authz.Actor, project
 		StoragePath:    path,
 		SizeBytes:      size,
 		DeclaredMime:   mimeType,
-	}); err != nil {
-		s.log.ErrorContext(ctx, "ocr submit failed; document stays pending", "error", err, "document_id", created.ID)
+	})
+	if submitErr != nil {
+		s.log.ErrorContext(ctx, "ocr submit failed; document stays pending", "error", submitErr, "document_id", created.ID)
+	} else if ocrDocID != "" {
+		// Persist the ocr job id so the reconciliation sweep can ask the
+		// gateway about this document if its routed event never arrives. The
+		// document exists already; a failed save only degrades the sweep.
+		ocrID := uuid.MustParse(ocrDocID)
+		if _, saveErr := s.repo.SetOcrDocumentID(ctx, repository.SetOcrDocumentIDParams{
+			ID:            created.ID,
+			OcrDocumentID: &ocrID,
+		}); saveErr != nil {
+			s.log.WarnContext(ctx, "saving ocr document id failed; sweep will not cover this document",
+				"error", saveErr, "document_id", created.ID)
+		}
 	}
 	doc := createdRowToDoc(created)
 	doc.FileURL = s.fileURL(ctx, created.StoragePath, created.FileName)

@@ -423,6 +423,72 @@ func (q *Queries) ListDocumentsByTransaction(ctx context.Context, transactionID 
 	return items, nil
 }
 
+const listStaleOCRDocuments = `-- name: ListStaleOCRDocuments :many
+SELECT id, ocr_document_id
+FROM documents
+WHERE deleted_at IS NULL
+  AND ocr_status IN ('pending', 'processing')
+  AND ocr_document_id IS NOT NULL
+  AND created_at < $1
+ORDER BY created_at
+LIMIT $2
+`
+
+type ListStaleOCRDocumentsParams struct {
+	CreatedAt time.Time `json:"created_at"`
+	Limit     int32     `json:"limit"`
+}
+
+type ListStaleOCRDocumentsRow struct {
+	ID            uuid.UUID  `json:"id"`
+	OcrDocumentID *uuid.UUID `json:"ocr_document_id"`
+}
+
+// Documents still waiting on OCR past the sweep threshold that have a job id
+// to ask about. Rows without ocr_document_id predate submit-response storage
+// and can only be resolved by the routed event.
+func (q *Queries) ListStaleOCRDocuments(ctx context.Context, arg ListStaleOCRDocumentsParams) ([]ListStaleOCRDocumentsRow, error) {
+	rows, err := q.db.Query(ctx, listStaleOCRDocuments, arg.CreatedAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListStaleOCRDocumentsRow{}
+	for rows.Next() {
+		var i ListStaleOCRDocumentsRow
+		if err := rows.Scan(&i.ID, &i.OcrDocumentID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const setOcrDocumentID = `-- name: SetOcrDocumentID :execrows
+UPDATE documents
+SET ocr_document_id = $2
+WHERE id = $1
+  AND ocr_document_id IS NULL
+`
+
+type SetOcrDocumentIDParams struct {
+	ID            uuid.UUID  `json:"id"`
+	OcrDocumentID *uuid.UUID `json:"ocr_document_id"`
+}
+
+// Stores the ocr job id returned at submit time, so the reconciliation sweep
+// can ask the gateway about documents whose routed event never arrived.
+func (q *Queries) SetOcrDocumentID(ctx context.Context, arg SetOcrDocumentIDParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setOcrDocumentID, arg.ID, arg.OcrDocumentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const softDeleteDocument = `-- name: SoftDeleteDocument :execrows
 UPDATE documents
 SET deleted_at = now()

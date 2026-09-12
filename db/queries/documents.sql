@@ -69,3 +69,24 @@ WHERE id = $1 AND ocr_status = 'processing';
 UPDATE documents
 SET ocr_status = 'failed', ocr_processed_at = now()
 WHERE id = $1 AND ocr_status = 'processing';
+
+-- name: SetOcrDocumentID :execrows
+-- Stores the ocr job id returned at submit time, so the reconciliation sweep
+-- can ask the gateway about documents whose routed event never arrived.
+UPDATE documents
+SET ocr_document_id = $2
+WHERE id = $1
+  AND ocr_document_id IS NULL;
+
+-- name: ListStaleOCRDocuments :many
+-- Documents still waiting on OCR past the sweep threshold that have a job id
+-- to ask about. Rows without ocr_document_id predate submit-response storage
+-- and can only be resolved by the routed event.
+SELECT id, ocr_document_id
+FROM documents
+WHERE deleted_at IS NULL
+  AND ocr_status IN ('pending', 'processing')
+  AND ocr_document_id IS NOT NULL
+  AND created_at < $1
+ORDER BY created_at
+LIMIT $2;

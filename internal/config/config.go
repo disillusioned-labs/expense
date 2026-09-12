@@ -64,6 +64,14 @@ type OcrConfig struct {
 	// means OCR integration is off: submits log and return, no error - a
 	// missing gateway must not fail an upload.
 	GatewayTarget string `mapstructure:"gateway_target"`
+	// SweepInterval is how often the worker reconciles documents whose routed
+	// OCR event never arrived. Only meaningful when GatewayTarget is set.
+	SweepInterval time.Duration `mapstructure:"sweep_interval"`
+	// SweepAfter is the pending age past which a document becomes eligible
+	// for the sweep - long enough that a normal routed event wins the race.
+	SweepAfter time.Duration `mapstructure:"sweep_after"`
+	// SweepBatch bounds one sweep tick.
+	SweepBatch int `mapstructure:"sweep_batch"`
 }
 
 // ReminderConfig schedules the approval-stall nag: an active approval step
@@ -292,6 +300,17 @@ func (c *Config) validate() error {
 	}
 
 	// gRPC client validation.
+	// OCR sweep validation.
+	if c.Ocr.SweepInterval <= 0 {
+		errs = append(errs, fmt.Errorf("ocr.sweep_interval must be > 0, got %s", c.Ocr.SweepInterval))
+	}
+	if c.Ocr.SweepAfter <= 0 {
+		errs = append(errs, fmt.Errorf("ocr.sweep_after must be > 0, got %s", c.Ocr.SweepAfter))
+	}
+	if c.Ocr.SweepBatch <= 0 {
+		errs = append(errs, fmt.Errorf("ocr.sweep_batch must be > 0, got %d", c.Ocr.SweepBatch))
+	}
+
 	if err := platformconfig.ValidateGRPCClient(&c.GRPCClient); err != nil {
 		errs = append(errs, err)
 	}
@@ -442,4 +461,7 @@ func setDefaults(v *viper.Viper) {
 	// OCR submitter. Empty target = noop (documents stay pending OCR), so a
 	// deployment without the OCR pipeline never fails an upload.
 	v.SetDefault("ocr.gateway_target", "")
+	v.SetDefault("ocr.sweep_interval", "15m")
+	v.SetDefault("ocr.sweep_after", "5m")
+	v.SetDefault("ocr.sweep_batch", 50)
 }

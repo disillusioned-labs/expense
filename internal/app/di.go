@@ -48,13 +48,23 @@ func buildDeps(
 	authErrorHandler := func(w http.ResponseWriter, _ *http.Request, _ error) {
 		handler.WriteError(w, http.StatusUnauthorized, handler.CodeUnauthorized, "unauthorized")
 	}
+	verifierOpts := []authkit.Option{
+		authkit.WithErrorHandler(authErrorHandler),
+		authkit.WithLogger(log),
+	}
+	// Persist the JWKS document so a restart while identity is down verifies
+	// from the last fetched key set instead of failing every request. Redis
+	// optional/absent keeps the memory-only behaviour - never pass a typed-nil
+	// client into the store.
+	if rdb != nil {
+		verifierOpts = append(verifierOpts, authkit.WithStore(authz.NewRedisJWKSStore(rdb)))
+	}
 	verifier := authkit.New(
 		authkit.Config{
 			Issuer:  cfg.Auth.Issuer,
 			JWKSURL: cfg.Auth.JWKSURL,
 		},
-		authkit.WithErrorHandler(authErrorHandler),
-		authkit.WithLogger(log),
+		verifierOpts...,
 	)
 
 	authorizer := authz.NewAuthorizer(repo, identityClient, log)

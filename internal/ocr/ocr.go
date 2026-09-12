@@ -5,8 +5,11 @@ import (
 	"log/slog"
 )
 
+// Submitter submits a document for OCR. It returns the gateway's job id
+// (ocr document_id) so the caller can persist it for the reconciliation
+// sweep; an empty id with a nil error means submit was skipped (noop mode).
 type Submitter interface {
-	SubmitDocument(ctx context.Context, in SubmitInput) error
+	SubmitDocument(ctx context.Context, in SubmitInput) (string, error)
 }
 
 type SubmitInput struct {
@@ -28,11 +31,11 @@ func NewNoopSubmitter(log *slog.Logger) Submitter {
 	return &noopSubmitter{log: log}
 }
 
-func (s *noopSubmitter) SubmitDocument(ctx context.Context, in SubmitInput) error {
+func (s *noopSubmitter) SubmitDocument(ctx context.Context, in SubmitInput) (string, error) {
 	s.log.WarnContext(ctx,
 		"OCR gateway not configured (OCR_GATEWAY_TARGET empty); document stays pending OCR",
 		"document_ref", in.ExternalRef,
 		"storage_path", in.StoragePath,
 	)
-	return nil
+	return "", nil
 }

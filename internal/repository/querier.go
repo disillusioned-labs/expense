@@ -75,6 +75,10 @@ type Querier interface {
 	// Active (undecided) approval steps waiting longer than the cutoff, across
 	// all organizations - the reminder worker's feed.
 	ListStaleActiveApprovals(ctx context.Context, arg ListStaleActiveApprovalsParams) ([]ListStaleActiveApprovalsRow, error)
+	// Documents still waiting on OCR past the sweep threshold that have a job id
+	// to ask about. Rows without ocr_document_id predate submit-response storage
+	// and can only be resolved by the routed event.
+	ListStaleOCRDocuments(ctx context.Context, arg ListStaleOCRDocumentsParams) ([]ListStaleOCRDocumentsRow, error)
 	ListTransactionItems(ctx context.Context, transactionID uuid.UUID) ([]TransactionItem, error)
 	ListTransactions(ctx context.Context, arg ListTransactionsParams) ([]ListTransactionsRow, error)
 	LockTransaction(ctx context.Context, id uuid.UUID) (Transaction, error)
@@ -85,6 +89,9 @@ type Querier interface {
 	ReleaseOutboxEventLock(ctx context.Context, id uuid.UUID) error
 	ResolveDefaultRules(ctx context.Context, organizationID uuid.UUID) ([]ApprovalRule, error)
 	ResolveProjectRules(ctx context.Context, arg ResolveProjectRulesParams) ([]ApprovalRule, error)
+	// Stores the ocr job id returned at submit time, so the reconciliation sweep
+	// can ask the gateway about documents whose routed event never arrived.
+	SetOcrDocumentID(ctx context.Context, arg SetOcrDocumentIDParams) (int64, error)
 	SoftDeleteApprovalRule(ctx context.Context, arg SoftDeleteApprovalRuleParams) (int64, error)
 	SoftDeleteDocument(ctx context.Context, id uuid.UUID) (int64, error)
 	SoftDeleteProject(ctx context.Context, arg SoftDeleteProjectParams) (int64, error)
