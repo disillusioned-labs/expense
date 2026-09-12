@@ -37,7 +37,7 @@ func newIdentityClient(ctx context.Context, cfg *config.Config, log *slog.Logger
 		opts = append(opts, platformgrpc.WithTLS(tlsConfig))
 	}
 
-	client, err := platformgrpc.NewClient(cfg.GRPCClient.Target, opts...)
+	client, err := platformgrpc.NewClient(cfg.Identity.GRPCTarget, opts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create identity gRPC client: %w", err)
 	}

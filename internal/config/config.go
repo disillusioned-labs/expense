@@ -40,10 +40,20 @@ type Config struct {
 	Auth       AuthConfig                      `mapstructure:"auth"`
 	Storage    StorageConfig                   `mapstructure:"storage"`
 	GRPCClient platformconfig.GRPCClientConfig `mapstructure:"grpc_client"`
+	Identity   IdentityClientConfig            `mapstructure:"identity"`
 	// GRPC is the internal gRPC server surface (decision D2, ExpenseService).
 	GRPC   platformconfig.GRPCConfig `mapstructure:"grpc"`
 	Remind ReminderConfig            `mapstructure:"reminder"`
 	Ocr    OcrConfig                 `mapstructure:"ocr"`
+}
+
+// IdentityClientConfig names where identity's gRPC surface lives. Targets are
+// per-dependency keys, kept out of GRPCClientConfig (shared outbound knobs) so
+// the EnvKey-based .env layering names each variable after who it dials.
+type IdentityClientConfig struct {
+	// GRPCTarget is identity's gRPC address (identity.v1). Must not be empty:
+	// authz checks on every request dial identity.
+	GRPCTarget string `mapstructure:"grpc_target"`
 }
 
 // OcrConfig selects how documents reach the OCR pipeline. An empty
@@ -285,6 +295,9 @@ func (c *Config) validate() error {
 	if err := platformconfig.ValidateGRPCClient(&c.GRPCClient); err != nil {
 		errs = append(errs, err)
 	}
+	if strings.TrimSpace(c.Identity.GRPCTarget) == "" {
+		fail("identity.grpc_target must not be empty")
+	}
 
 	// gRPC server validation (internal ExpenseService surface, D2).
 	if err := platformconfig.ValidateGRPC(&c.GRPC); err != nil {
@@ -394,7 +407,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("storage.s3.ping_on_boot", true)
 
 	// gRPC client (expense → identity).
-	v.SetDefault("grpc_client.target", "localhost:9090")
+	v.SetDefault("identity.grpc_target", "localhost:9090")
 	v.SetDefault("grpc_client.timeout", "50ms")
 	v.SetDefault("grpc_client.max_recv_msg_size", 4194304)
 	v.SetDefault("grpc_client.max_send_msg_size", 4194304)

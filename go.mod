@@ -3,7 +3,7 @@ module github.com/disillusioned-labs/expense
 go 1.25.12
 
 require (
-	github.com/disillusioned-labs/platform v0.4.1
+	github.com/disillusioned-labs/platform v0.5.0
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-chi/httprate v0.16.0
 	github.com/go-playground/validator/v10 v10.30.3
