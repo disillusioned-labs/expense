@@ -20,7 +20,67 @@ services:
       - observability
     restart: unless-stopped
 
-# Service worker (outbox publisher) ditambahkan di sini bersama cmd/worker (M4).
+  grpc:
+    container_name: expense-grpc
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    env_file:
+      - .env
+      - .env.compose
+    entrypoint: ["/app/grpc"]
+    ports:
+      - "9091:9091"
+    networks:
+      - data
+      - messaging
+      - observability
+    restart: unless-stopped
+
+  consumer:
+    container_name: expense-consumer
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    env_file:
+      - .env
+      - .env.compose
+    entrypoint: ["/app/consumer"]
+    networks:
+      - data
+      - messaging
+      - observability
+    restart: unless-stopped
+
+  worker:
+    container_name: expense-worker
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    env_file:
+      - .env
+      - .env.compose
+    entrypoint: ["/app/worker"]
+    networks:
+      - data
+      - messaging
+      - observability
+    restart: unless-stopped
 
 networks:
   data:
