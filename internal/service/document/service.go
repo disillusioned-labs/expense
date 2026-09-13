@@ -214,20 +214,39 @@ func (s *documentService) upload(ctx context.Context, actor authz.Actor, project
 	hash := hex.EncodeToString(hasher.Sum(nil))
 	uploadedBy, uploadedByName, uploadedByEmail, uploadedByRole := s.snapshot(ctx, actor)
 
+	createdEvent := DocumentCreatedEvent{
+		OrganizationID: actor.OrgID,
+		ProjectID:      projectID,
+		TransactionID:  transactionID,
+		FileName:       fileName,
+		FileSize:       size,
+		ActorID:        actor.UserID,
+	}
+
 	var created repository.CreateDocumentRow
 	if transactionID == nil {
-		created, err = s.repo.CreateDocument(ctx, repository.CreateDocumentParams{
-			ProjectID:       projectID,
-			TransactionID:   nil,
-			StoragePath:     path,
-			FileName:        fileName,
-			FileSize:        size,
-			MimeType:        mimeType,
-			FileHash:        pgutil.String(hash),
-			UploadedBy:      uploadedBy,
-			UploadedByName:  uploadedByName,
-			UploadedByEmail: uploadedByEmail,
-			UploadedByRole:  uploadedByRole,
+		// Document row + audit event commit together - the outbox pattern
+		// applies to documents the same as any other aggregate.
+		err = s.repo.ExecTx(ctx, func(q repository.Querier) error {
+			created, err = q.CreateDocument(ctx, repository.CreateDocumentParams{
+				ProjectID:       projectID,
+				TransactionID:   nil,
+				StoragePath:     path,
+				FileName:        fileName,
+				FileSize:        size,
+				MimeType:        mimeType,
+				FileHash:        pgutil.String(hash),
+				UploadedBy:      uploadedBy,
+				UploadedByName:  uploadedByName,
+				UploadedByEmail: uploadedByEmail,
+				UploadedByRole:  uploadedByRole,
+			})
+			if err != nil {
+				return err
+			}
+			createdEvent.DocumentID = created.ID
+			return service.Emit(ctx, q, "document", created.ID,
+				EventDocumentCreated, constant.TopicAudit, createdEvent)
 		})
 	} else {
 		// The document binds to a draft that must stay draft across the
@@ -256,7 +275,12 @@ func (s *documentService) upload(ctx context.Context, actor authz.Actor, project
 				UploadedByEmail: uploadedByEmail,
 				UploadedByRole:  uploadedByRole,
 			})
-			return lockErr
+			if lockErr != nil {
+				return lockErr
+			}
+			createdEvent.DocumentID = created.ID
+			return service.Emit(ctx, q, "document", created.ID,
+				EventDocumentCreated, constant.TopicAudit, createdEvent)
 		})
 	}
 	if err != nil {
@@ -308,6 +332,20 @@ func (s *documentService) Get(ctx context.Context, actor authz.Actor, id uuid.UU
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "get failed")
 		s.log.ErrorContext(ctx, "get failed", "error", err)
+		return Document{}, err
+	}
+
+	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		return service.Emit(ctx, q, "document", d.ID,
+			EventDocumentAccessed, constant.TopicAudit, DocumentAccessedEvent{
+				OrganizationID: actor.OrgID,
+				DocumentID:     d.ID,
+				ActorID:        actor.UserID,
+			})
+	}); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "emit document accessed failed")
+		s.log.ErrorContext(ctx, "emit document accessed failed", "error", err)
 		return Document{}, err
 	}
 
@@ -453,16 +491,29 @@ func (s *documentService) Delete(ctx context.Context, actor authz.Actor, id uuid
 		}
 	}
 
-	rows, err := s.repo.SoftDeleteDocument(ctx, id)
-	if err != nil {
+	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		rows, err := q.SoftDeleteDocument(ctx, id)
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return service.ErrNotFound
+		}
+		return service.Emit(ctx, q, "document", id,
+			EventDocumentDeleted, constant.TopicAudit, DocumentDeletedEvent{
+				OrganizationID: actor.OrgID,
+				DocumentID:     id,
+				FileName:       d.FileName,
+				ActorID:        actor.UserID,
+			})
+	}); err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			return service.ErrNotFound
+		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "soft delete failed")
 		s.log.ErrorContext(ctx, "soft delete failed", "error", err)
 		return err
-	}
-
-	if rows == 0 {
-		return service.ErrNotFound
 	}
 	return nil
 }

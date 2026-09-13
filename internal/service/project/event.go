@@ -7,6 +7,8 @@ const (
 	EventProjectUpdated       = "project.updated"
 	EventProjectMemberPlaced  = "project_member.placed"
 	EventProjectMemberRemoved = "project_member.removed"
+	EventProjectArchived      = "project.archived"
+	EventProjectUnarchived    = "project.unarchived"
 )
 
 type ProjectCreatedEvent struct {
@@ -33,5 +35,11 @@ type ProjectMemberRemovedEvent struct {
 	OrganizationID uuid.UUID `json:"organization_id"`
 	ProjectID      uuid.UUID `json:"project_id"`
 	UserID         uuid.UUID `json:"user_id"`
+	ActorID        uuid.UUID `json:"actor_id"`
+}
+
+type ProjectArchivedEvent struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	ProjectID      uuid.UUID `json:"project_id"`
 	ActorID        uuid.UUID `json:"actor_id"`
 }

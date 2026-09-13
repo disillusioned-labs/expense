@@ -288,8 +288,17 @@ func (s *projectService) Archive(ctx context.Context, actor authz.Actor, id uuid
 	ctx, span := tracer.Start(ctx, "ProjectService.Archive")
 	defer span.End()
 
-	p, err := s.repo.ArchiveProject(ctx, repository.ArchiveProjectParams{ID: id, OrganizationID: actor.OrgID})
-	if err != nil {
+	var p repository.Project
+	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		var err error
+		p, err = q.ArchiveProject(ctx, repository.ArchiveProjectParams{ID: id, OrganizationID: actor.OrgID})
+		if err != nil {
+			return err
+		}
+		return service.Emit(ctx, q, "project", id, EventProjectArchived, constant.TopicAudit, ProjectArchivedEvent{
+			OrganizationID: actor.OrgID, ProjectID: id, ActorID: actor.UserID,
+		})
+	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Project{}, service.ErrNotFound
 		}
@@ -306,8 +315,17 @@ func (s *projectService) Unarchive(ctx context.Context, actor authz.Actor, id uu
 	ctx, span := tracer.Start(ctx, "ProjectService.Unarchive")
 	defer span.End()
 
-	p, err := s.repo.UnarchiveProject(ctx, repository.UnarchiveProjectParams{ID: id, OrganizationID: actor.OrgID})
-	if err != nil {
+	var p repository.Project
+	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		var err error
+		p, err = q.UnarchiveProject(ctx, repository.UnarchiveProjectParams{ID: id, OrganizationID: actor.OrgID})
+		if err != nil {
+			return err
+		}
+		return service.Emit(ctx, q, "project", id, EventProjectUnarchived, constant.TopicAudit, ProjectArchivedEvent{
+			OrganizationID: actor.OrgID, ProjectID: id, ActorID: actor.UserID,
+		})
+	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Project{}, service.ErrNotFound
 		}
