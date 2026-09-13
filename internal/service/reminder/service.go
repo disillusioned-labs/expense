@@ -87,7 +87,9 @@ func (s *reminderService) RemindOnce(ctx context.Context) (int, error) {
 	sent := 0
 	for _, r := range rows {
 		u, ok := byID[r.ApproverID]
-		if !ok || !u.IsActive || !approvalserv.ValidEmail(u.Email) {
+		// Push reaches the user regardless of snapshot email quality; a bad
+		// email only removes the email target (see notify.go).
+		if !ok || !u.IsActive {
 			continue
 		}
 
@@ -106,14 +108,23 @@ func (s *reminderService) RemindOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return sent, err
 		}
+		targets := make([]notificationcontract.Target, 0, 2)
+		if approvalserv.ValidEmail(u.Email) {
+			targets = append(targets, notificationcontract.Target{
+				Channel:     notificationcontract.ChannelEmail,
+				Destination: u.Email,
+			})
+		}
+		targets = append(targets, notificationcontract.Target{
+			Channel:     notificationcontract.ChannelPush,
+			Destination: u.UserID.String(),
+		})
 		event := notificationcontract.CreatedEvent{
 			NotificationType: approvalserv.NotificationReminder,
 			Category:         notificationcontract.CategoryTransactional,
 			RecipientID:      u.UserID.String(),
-			Targets: []notificationcontract.Target{
-				{Channel: notificationcontract.ChannelEmail, Destination: u.Email},
-			},
-			Payload: payload,
+			Targets:          targets,
+			Payload:          payload,
 		}
 		if err := event.Validate(); err != nil {
 			return sent, err

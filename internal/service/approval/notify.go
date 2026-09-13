@@ -60,32 +60,43 @@ func ValidEmail(email string) bool {
 	return email != "" && email != snapshotUnknownEmail && strings.Contains(email, "@")
 }
 
-// notificationEvent builds a notification.created envelope addressed to one
-// email target, mirroring how identity emits its transactional events.
+// notificationEvent builds a notification.created envelope. The email target
+// appears only for a deliverable address; the push target is always present
+// and carries the recipient's user id - the notification service resolves it
+// to device tokens via identity's GetDeviceTokens gRPC. A user with no
+// registered devices simply produces no push deliveries.
 func notificationEvent(notificationType, recipientID, email string, payload any) (notificationcontract.CreatedEvent, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return notificationcontract.CreatedEvent{}, err
 	}
+
+	targets := make([]notificationcontract.Target, 0, 2)
+	if ValidEmail(email) {
+		targets = append(targets, notificationcontract.Target{
+			Channel:     notificationcontract.ChannelEmail,
+			Destination: email,
+		})
+	}
+	targets = append(targets, notificationcontract.Target{
+		Channel:     notificationcontract.ChannelPush,
+		Destination: recipientID,
+	})
+
 	event := notificationcontract.CreatedEvent{
 		NotificationType: notificationType,
 		Category:         notificationcontract.CategoryTransactional,
 		RecipientID:      recipientID,
-		Targets: []notificationcontract.Target{
-			{Channel: notificationcontract.ChannelEmail, Destination: email},
-		},
-		Payload: body,
+		Targets:          targets,
+		Payload:          body,
 	}
 	return event, event.Validate()
 }
 
 // emitStepActivated publishes the "your turn" notification for an approver
-// whose step just went active. Invalid emails (snapshot "unknown") skip
-// silently: the approval flow must not fail because identity data is missing.
+// whose step just went active. A snapshot email of "unknown" only removes the
+// email target; the push target (user id) is unaffected.
 func emitStepActivated(ctx context.Context, q repository.Querier, orgID, txID, approverID uuid.UUID, approverName, approverEmail, description string, total int64, currency string, step int) error {
-	if !ValidEmail(approverEmail) {
-		return nil
-	}
 	event, err := notificationEvent(NotificationStepActivated, approverID.String(), approverEmail, StepActivatedPayload{
 		ApproverName:           approverName,
 		TransactionID:          txID.String(),
@@ -102,9 +113,6 @@ func emitStepActivated(ctx context.Context, q repository.Querier, orgID, txID, a
 // emitDecisionReceived publishes the "a decision landed on your transaction"
 // notification to the transaction creator.
 func emitDecisionReceived(ctx context.Context, q repository.Querier, orgID, txID, creatorID uuid.UUID, creatorEmail, creatorName, description string, total int64, currency, decision, deciderName string) error {
-	if !ValidEmail(creatorEmail) {
-		return nil
-	}
 	event, err := notificationEvent(NotificationDecisionReceived, creatorID.String(), creatorEmail, DecisionReceivedPayload{
 		CreatorName:            creatorName,
 		TransactionID:          txID.String(),
