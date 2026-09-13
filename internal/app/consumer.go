@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/disillusioned-labs/expense/internal/config"
 	"github.com/disillusioned-labs/expense/internal/repository"
@@ -112,6 +113,10 @@ func runOCRConsumer(
 	for {
 		records, err := consumer.Poll(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				commitPending(consumer, log)
+				return nil
+			}
 			return fmt.Errorf("poll document.processed: %w", err)
 		}
 		for _, rec := range records {
@@ -120,9 +125,21 @@ func runOCRConsumer(
 					"topic", rec.Topic, "partition", rec.Partition, "offset", rec.Offset)
 			}
 			if err := consumer.CommitRecords(ctx, rec); err != nil {
+				commitPending(consumer, log)
 				return fmt.Errorf("commit document.processed offset: %w", err)
 			}
 		}
+	}
+}
+
+// commitPending flushes any processed-but-uncommitted offsets to the broker.
+// It uses a fresh context because the caller's context is already cancelled.
+func commitPending(consumer *kafka.Consumer, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := consumer.CommitUncommitted(ctx); err != nil {
+		log.Error("failed to commit pending offsets during shutdown", "error", err)
 	}
 }
 
