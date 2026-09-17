@@ -117,16 +117,43 @@ func runOCRConsumer(
 				commitPending(consumer, log)
 				return nil
 			}
+
+			if kafka.IsTransientError(err) {
+				log.Warn(
+					"kafka poll failed, retrying",
+					"error", err,
+				)
+				continue
+			}
+
 			return fmt.Errorf("poll document.processed: %w", err)
 		}
+
 		for _, rec := range records {
-			if err := handleOCRRecord(ctx, svc, dlq, rec, log); err != nil {
-				log.Error("ocr consumer record failed", "error", err,
-					"topic", rec.Topic, "partition", rec.Partition, "offset", rec.Offset)
+			if err := handleOCRRecord(
+				ctx,
+				svc,
+				dlq,
+				rec,
+				log,
+			); err != nil {
+				return fmt.Errorf(
+					"process document.processed topic=%s partition=%d offset=%d: %w",
+					rec.Topic,
+					rec.Partition,
+					rec.Offset,
+					err,
+				)
 			}
+
 			if err := consumer.CommitRecords(ctx, rec); err != nil {
-				commitPending(consumer, log)
-				return fmt.Errorf("commit document.processed offset: %w", err)
+				return fmt.Errorf(
+					"commit document.processed topic=%s partition=%d offset=%d: %w",
+					rec.Topic,
+					rec.Partition,
+					rec.Offset,
+					err,
+				)
 			}
 		}
 	}
