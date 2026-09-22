@@ -18,6 +18,7 @@ import (
 	transactionhandler "github.com/disillusioned-labs/expense/internal/handler/transaction"
 	"github.com/disillusioned-labs/platform/authkit"
 	"github.com/disillusioned-labs/platform/cache"
+	"github.com/disillusioned-labs/platform/httpserver"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -28,8 +29,7 @@ import (
 )
 
 type Server struct {
-	http   *http.Server
-	log    *slog.Logger
+	http   *httpserver.Server
 	health *health.Handler
 }
 
@@ -52,11 +52,11 @@ func (p redisPinger) Ping(ctx context.Context) error { return p.rdb.Ping(ctx).Er
 // Deps carries everything the router needs. Adding a resource adds a field
 // here; New's signature never changes.
 type Deps struct {
-	Pool          *pgxpool.Pool
-	Redis         *goredis.Client
-	RedisRequired bool
-	Cache         cache.Cache
-	Verifier      *authkit.Verifier
+	Pool             *pgxpool.Pool
+	Redis            *goredis.Client
+	RedisRequired    bool
+	Cache            cache.Cache
+	Verifier         *authkit.Verifier
 	AuthErrorHandler authkit.HTTPErrorHandler
 
 	RoleHandler        *rolehandler.Handler
@@ -68,7 +68,7 @@ type Deps struct {
 
 // New assembles the router - middleware chain and probes, plus the /api/v1
 // subtree with its rate limiter.
-func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
+func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -148,17 +148,22 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) *Server {
 		otelhttp.WithFilter(func(r *http.Request) bool { return !isProbe(r.URL.Path) }),
 	)
 
-	return &Server{
-		http: &http.Server{
-			Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-			Handler:      root,
-			ReadTimeout:  cfg.Server.ReadTimeout,
-			WriteTimeout: cfg.Server.WriteTimeout,
-			IdleTimeout:  cfg.Server.IdleTimeout,
-		},
-		log:    log,
-		health: healthHandler,
+	httpServer, err := httpserver.New(
+		root,
+		httpserver.WithAddress(fmt.Sprintf(":%d", cfg.Server.Port)),
+		httpserver.WithReadTimeout(cfg.Server.ReadTimeout),
+		httpserver.WithWriteTimeout(cfg.Server.WriteTimeout),
+		httpserver.WithIdleTimeout(cfg.Server.IdleTimeout),
+		httpserver.WithLogger(log),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build HTTP server: %w", err)
 	}
+
+	return &Server{
+		http:   httpServer,
+		health: healthHandler,
+	}, nil
 }
 
 // BeginDrain flips /readyz to 503 while continuing to serve traffic, so an
@@ -167,11 +172,7 @@ func (s *Server) BeginDrain() { s.health.BeginDrain() }
 
 // Start blocks until the listener fails or Shutdown is called.
 func (s *Server) Start() error {
-	s.log.Info("http server listening", "addr", s.http.Addr)
-	if err := s.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("http server: %w", err)
-	}
-	return nil
+	return s.http.Start()
 }
 
 // Shutdown drains in-flight requests within ctx and closes the listener.

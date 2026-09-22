@@ -159,7 +159,10 @@ func RunAPI(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("build dependencies: %w", err)
 	}
-	srv := server.New(cfg, log, deps)
+	srv, err := server.New(cfg, log, deps)
+	if err != nil {
+		return err
+	}
 	pprofSrv := server.NewPprofServer(cfg.Pprof.Enabled, cfg.Pprof.Port, log)
 
 	// Each listener runs in the group; the first hard failure cancels runCtx
