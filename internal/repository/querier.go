@@ -32,7 +32,7 @@ type Querier interface {
 	CreateApproval(ctx context.Context, arg CreateApprovalParams) error
 	CreateApprovalDecision(ctx context.Context, arg CreateApprovalDecisionParams) (ApprovalDecision, error)
 	CreateApprovalRule(ctx context.Context, arg CreateApprovalRuleParams) (ApprovalRule, error)
-	CreateDefaultApprovalRule(ctx context.Context, arg CreateDefaultApprovalRuleParams) (ApprovalRule, error)
+	CreateDefaultApprovalRule(ctx context.Context, arg CreateDefaultApprovalRuleParams) error
 	CreateDocument(ctx context.Context, arg CreateDocumentParams) (CreateDocumentRow, error)
 	CreateOutboxEvent(ctx context.Context, arg CreateOutboxEventParams) (OutboxEvent, error)
 	CreateProject(ctx context.Context, arg CreateProjectParams) (Project, error)
@@ -46,6 +46,9 @@ type Querier interface {
 	GetApprovalForDecide(ctx context.Context, id uuid.UUID) (GetApprovalForDecideRow, error)
 	GetApprovalRule(ctx context.Context, arg GetApprovalRuleParams) (ApprovalRule, error)
 	GetDocument(ctx context.Context, arg GetDocumentParams) (GetDocumentRow, error)
+	// This row lock serializes OCR attachment/draft creation with document delete.
+	// OCR creation locks document then inserts a transaction; delete locks a known
+	// transaction first, then the document, and locks a newly linked draft second.
 	GetDocumentForProcessing(ctx context.Context, id uuid.UUID) (GetDocumentForProcessingRow, error)
 	GetOldestPendingOutboxAgeSeconds(ctx context.Context) (int64, error)
 	GetProject(ctx context.Context, arg GetProjectParams) (Project, error)
@@ -81,6 +84,7 @@ type Querier interface {
 	ListStaleOCRDocuments(ctx context.Context, arg ListStaleOCRDocumentsParams) ([]ListStaleOCRDocumentsRow, error)
 	ListTransactionItems(ctx context.Context, transactionID uuid.UUID) ([]TransactionItem, error)
 	ListTransactions(ctx context.Context, arg ListTransactionsParams) ([]ListTransactionsRow, error)
+	LockProjectForDelete(ctx context.Context, arg LockProjectForDeleteParams) (Project, error)
 	LockTransaction(ctx context.Context, id uuid.UUID) (Transaction, error)
 	MarkOutboxEventFailed(ctx context.Context, arg MarkOutboxEventFailedParams) error
 	MarkOutboxEventPublished(ctx context.Context, id uuid.UUID) error

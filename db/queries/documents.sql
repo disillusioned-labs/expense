@@ -45,6 +45,9 @@ UPDATE documents
 SET ocr_status = 'processing'
 WHERE id = $1 AND ocr_status = 'pending' AND deleted_at IS NULL;
 
+-- This row lock serializes OCR attachment/draft creation with document delete.
+-- OCR creation locks document then inserts a transaction; delete locks a known
+-- transaction first, then the document, and locks a newly linked draft second.
 -- name: GetDocumentForProcessing :one
 SELECT d.id, d.project_id, d.transaction_id, d.storage_path, d.file_name, d.file_size,
        d.mime_type, d.file_hash, d.ocr_status, d.ocr_data, d.ocr_processed_at,
@@ -53,22 +56,23 @@ SELECT d.id, d.project_id, d.transaction_id, d.storage_path, d.file_name, d.file
        p.organization_id
 FROM documents d
          JOIN projects p ON p.id = d.project_id
-WHERE d.id = $1 AND d.deleted_at IS NULL;
+WHERE d.id = $1 AND d.deleted_at IS NULL
+FOR UPDATE OF d;
 
 -- name: CompleteDocumentOCR :execrows
 UPDATE documents
 SET ocr_status = $2, ocr_data = $3, ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing';
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL;
 
 -- name: AttachDocumentToTransaction :execrows
 UPDATE documents
 SET transaction_id = $2, ocr_status = $3, ocr_data = $4, ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing';
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL;
 
 -- name: FailDocumentOCR :execrows
 UPDATE documents
 SET ocr_status = 'failed', ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing';
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL;
 
 -- name: SetOcrDocumentID :execrows
 -- Stores the ocr job id returned at submit time, so the reconciliation sweep

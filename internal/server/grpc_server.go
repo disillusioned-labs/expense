@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 
+	"github.com/disillusioned-labs/expense/internal/authz"
 	"github.com/disillusioned-labs/expense/internal/config"
 	grpchandler "github.com/disillusioned-labs/expense/internal/handler/grpc"
 	approvalservice "github.com/disillusioned-labs/expense/internal/service/approval"
@@ -21,7 +22,7 @@ type GRPCServer struct {
 	cfg  *config.Config
 }
 
-func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.ApprovalService) (*GRPCServer, error) {
+func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.ApprovalService, authorizer *authz.Authorizer) (*GRPCServer, error) {
 	opts := []platformgrpc.Option{
 		platformgrpc.WithMaxRecvMsgSize(cfg.GRPC.MaxRecvMsgSize),
 		platformgrpc.WithMaxSendMsgSize(cfg.GRPC.MaxSendMsgSize),
@@ -48,7 +49,7 @@ func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.App
 		return nil, fmt.Errorf("grpc server: %w", err)
 	}
 
-	expenseServer := grpchandler.NewExpenseServer(approvals, log)
+	expenseServer := grpchandler.NewExpenseServer(approvals, authorizer, log)
 	expensepb.RegisterExpenseServiceServer(grpcServer.GRPC(), expenseServer)
 
 	return &GRPCServer{grpc: grpcServer, log: log, cfg: cfg}, nil

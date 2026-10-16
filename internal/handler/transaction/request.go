@@ -11,10 +11,11 @@ type ItemRequest struct {
 }
 
 type UpdateRequest struct {
-	Description *string       `json:"description"`
-	Items       []ItemRequest `json:"items"`
-	Currency    string        `json:"currency"`
-	Category    *string       `json:"category"`
+	Description     *string       `json:"description"`
+	Items           []ItemRequest `json:"items"`
+	Currency        string        `json:"currency"`
+	Category        *string       `json:"category"`
+	ExpectedVersion int64         `json:"expected_version" validate:"min=1"`
 }
 
 func toItemInputs(items []ItemRequest) []transactionservice.ItemInput {
@@ -30,9 +31,10 @@ func toItemInputs(items []ItemRequest) []transactionservice.ItemInput {
 
 func (r UpdateRequest) ToInput() transactionservice.UpdateInput {
 	return transactionservice.UpdateInput{
-		Description: r.Description,
-		Items:       toItemInputs(r.Items),
-		Currency:    r.Currency,
-		Category:    r.Category,
+		Description:     r.Description,
+		Items:           toItemInputs(r.Items),
+		Currency:        r.Currency,
+		Category:        r.Category,
+		ExpectedVersion: r.ExpectedVersion,
 	}
 }

@@ -16,6 +16,7 @@ type ActorBrief struct {
 type Transaction struct {
 	ID            uuid.UUID  `json:"id"`
 	Status        string     `json:"status"`
+	Version       int64      `json:"version"`
 	TotalAmount   int64      `json:"total_amount"`
 	Currency      string     `json:"currency"`
 	Category      *string    `json:"category"`
@@ -88,8 +89,9 @@ type ListFilters struct {
 }
 
 type UpdateInput struct {
-	Description *string
-	Items       []ItemInput
-	Currency    string
-	Category    *string
+	Description     *string
+	Items           []ItemInput
+	Currency        string
+	Category        *string
+	ExpectedVersion int64
 }

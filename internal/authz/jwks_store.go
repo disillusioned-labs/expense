@@ -3,8 +3,9 @@ package authz
 import (
 	"context"
 
-	authkit "github.com/disillusioned-labs/platform/authkit"
 	goredis "github.com/redis/go-redis/v9"
+
+	authkit "github.com/disillusioned-labs/platform/authkit"
 )
 
 // jwksStoreKey holds the raw JWKS document. One value per Redis database, not

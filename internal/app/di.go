@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
-	"github.com/disillusioned-labs/platform/s3"
 	"github.com/jackc/pgx/v5/pgxpool"
 	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/disillusioned-labs/platform/s3"
 
 	"github.com/disillusioned-labs/platform/authkit"
 	"github.com/disillusioned-labs/platform/cache"
@@ -32,7 +34,7 @@ import (
 )
 
 func buildDeps(
-	ctx context.Context,
+	_ context.Context,
 	pool *pgxpool.Pool,
 	rdb *goredis.Client,
 	redisRequired bool,
@@ -42,10 +44,21 @@ func buildDeps(
 	ocrSubmitter ocr.Submitter,
 	cfg *config.Config,
 	log *slog.Logger,
-) (server.Deps, error) {
+) server.Deps {
 	repo := repository.NewStore(pool)
 
-	authErrorHandler := func(w http.ResponseWriter, _ *http.Request, _ error) {
+	authErrorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
+		if errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+			handler.WriteError(w, http.StatusGatewayTimeout, handler.CodeTimeout, "request timed out")
+			return
+		}
+		if errors.Is(err, authkit.ErrDenylistUnavailable) {
+			handler.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization could not be verified")
+			return
+		}
 		handler.WriteError(w, http.StatusUnauthorized, handler.CodeUnauthorized, "unauthorized")
 	}
 	verifierOpts := []authkit.Option{
@@ -57,7 +70,10 @@ func buildDeps(
 	// optional/absent keeps the memory-only behaviour - never pass a typed-nil
 	// client into the store.
 	if rdb != nil {
-		verifierOpts = append(verifierOpts, authkit.WithStore(authz.NewRedisJWKSStore(rdb)))
+		verifierOpts = append(verifierOpts,
+			authkit.WithStore(authz.NewRedisJWKSStore(rdb)),
+			authkit.WithDenylist(authkit.NewRedisDenylist(rdb)),
+		)
 	}
 	verifier := authkit.New(
 		authkit.Config{
@@ -70,7 +86,7 @@ func buildDeps(
 	authorizer := authz.NewAuthorizer(repo, identityClient, log)
 
 	roleSvc := roleservice.NewRoleService(repo, log)
-	projectSvc := projectservice.NewProjectService(repo, authorizer, roleSvc, log)
+	projectSvc := projectservice.NewProjectService(repo, authorizer, log)
 
 	transactionSvc := transactionservice.NewTransactionService(repo, authorizer, storage, identityClient, log)
 
@@ -84,6 +100,7 @@ func buildDeps(
 		RedisRequired:    redisRequired,
 		Cache:            svcCache,
 		Verifier:         verifier,
+		Authorizer:       authorizer,
 		AuthErrorHandler: authErrorHandler,
 
 		RoleHandler:        rolehandler.NewRoleHandler(roleSvc, authorizer, log),
@@ -91,5 +108,5 @@ func buildDeps(
 		TransactionHandler: transactionhandler.NewTransactionHandler(transactionSvc, log),
 		DocumentHandler:    documenthandler.NewDocumentHandler(documentSvc, log),
 		ApprovalHandler:    approvalhandler.NewApprovalHandler(approvalSvc, log),
-	}, nil
+	}
 }

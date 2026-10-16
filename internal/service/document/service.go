@@ -10,11 +10,12 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/disillusioned-labs/platform/s3"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+
+	"github.com/disillusioned-labs/platform/s3"
 
 	"github.com/disillusioned-labs/expense/internal/authz"
 	"github.com/disillusioned-labs/expense/internal/constant"
@@ -153,6 +154,12 @@ func (s *documentService) AttachToTransaction(ctx context.Context, actor authz.A
 		s.log.ErrorContext(ctx, "get transaction failed", "error", err)
 		return Document{}, err
 	}
+	if err := s.authz.Can(ctx, actor, t.ProjectID, constant.ActionDocumentUpload); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "check upload permission failed")
+		s.log.ErrorContext(ctx, "check upload permission failed", "error", err)
+		return Document{}, err
+	}
 	if t.Status != constant.StatusDraft {
 		return Document{}, service.ErrTransactionLocked
 	}
@@ -200,7 +207,7 @@ func (s *documentService) upload(ctx context.Context, actor authz.Actor, project
 
 	fileName, mimeType, size, content := in.FileName, in.MimeType, in.Size, in.Content
 	docID := uuid.Must(uuid.NewV7())
-	key := fmt.Sprintf("%s/%s/%s%s", actor.OrgID, projectID, docID, fileExt(fileName))
+	key := fmt.Sprintf("%s/%s/%s%s", actor.OrgID, projectID, docID, extensionForMime(mimeType))
 
 	hasher := sha256.New()
 	path, err := s.storage.Put(ctx, constant.DocumentBucket, key, size, mimeType, io.TeeReader(content, hasher))
@@ -492,6 +499,51 @@ func (s *documentService) Delete(ctx context.Context, actor authz.Actor, id uuid
 	}
 
 	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		lockedTransactionID := uuid.Nil
+		lockTransaction := func(transactionID uuid.UUID) error {
+			transaction, err := q.LockTransaction(ctx, transactionID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return service.ErrNotFound
+				}
+				return err
+			}
+			if transaction.OrganizationID != actor.OrgID || transaction.DeletedAt.Valid {
+				return service.ErrNotFound
+			}
+			if transaction.Status != constant.StatusDraft {
+				return service.ErrTransactionLocked
+			}
+			lockedTransactionID = transaction.ID
+			return nil
+		}
+		if d.TransactionID != nil {
+			if err := lockTransaction(*d.TransactionID); err != nil {
+				return err
+			}
+		}
+
+		locked, err := q.GetDocumentForProcessing(ctx, id)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return service.ErrNotFound
+			}
+			return err
+		}
+		if locked.OrganizationID != actor.OrgID {
+			return service.ErrNotFound
+		}
+		if locked.TransactionID != nil {
+			if lockedTransactionID != uuid.Nil && lockedTransactionID != *locked.TransactionID {
+				return service.ErrConflict
+			}
+			if lockedTransactionID == uuid.Nil {
+				if err := lockTransaction(*locked.TransactionID); err != nil {
+					return err
+				}
+			}
+		}
+
 		rows, err := q.SoftDeleteDocument(ctx, id)
 		if err != nil {
 			return err
@@ -503,7 +555,7 @@ func (s *documentService) Delete(ctx context.Context, actor authz.Actor, id uuid
 			EventDocumentDeleted, constant.TopicAudit, DocumentDeletedEvent{
 				OrganizationID: actor.OrgID,
 				DocumentID:     id,
-				FileName:       d.FileName,
+				FileName:       locked.FileName,
 				ActorID:        actor.UserID,
 			})
 	}); err != nil {
@@ -518,14 +570,17 @@ func (s *documentService) Delete(ctx context.Context, actor authz.Actor, id uuid
 	return nil
 }
 
-func fileExt(name string) string {
-	for i := len(name) - 1; i >= 0; i-- {
-		if name[i] == '.' {
-			if ext := name[i:]; len(ext) <= 10 {
-				return ext
-			}
-			return ""
-		}
+func extensionForMime(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "application/pdf":
+		return ".pdf"
+	default:
+		return ""
 	}
-	return ""
 }

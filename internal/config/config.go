@@ -84,9 +84,7 @@ type ReminderConfig struct {
 	BatchSize     int           `mapstructure:"batch_size"`
 }
 
-// StorageConfig selects the document store engine and its settings. The
-// default engine is the local dev filesystem; s3 points at any S3-compatible
-// object storage via platform/s3.
+// StorageConfig contains settings for the S3 document store used by Expense.
 type StorageConfig struct {
 	S3 StorageS3Config `mapstructure:"s3"`
 }
@@ -96,7 +94,7 @@ type StorageS3Config struct {
 	// Empty means real AWS.
 	Endpoint string `mapstructure:"endpoint"`
 	// Region is the signing region (a placeholder such as us-east-1 works
-	// for MinIO). Always required when engine=s3.
+	// for MinIO).
 	Region string `mapstructure:"region"`
 	// Static credentials for S3-compatible servers. Leave AccessKeyID empty
 	// to use the default AWS credential chain (env/IMDSv2).
@@ -238,6 +236,9 @@ func (c *Config) validate() error {
 	default:
 		fail("redis.mode must be one of disabled|optional|required, got %q", c.Redis.Mode)
 	}
+	if c.Service.Env == platformconfig.EnvProduction && c.Redis.Mode != platformconfig.RedisModeRequired {
+		fail("redis.mode must be required in production to enforce token revocation")
+	}
 	if c.Redis.DB < 0 {
 		fail("redis.db must not be negative, got %d", c.Redis.DB)
 	}
@@ -290,10 +291,10 @@ func (c *Config) validate() error {
 	}
 
 	if c.Storage.S3.Region == "" {
-		fail("storage.s3.region must not be empty when storage.engine=s3 (us-east-1 works for MinIO)")
+		fail("storage.s3.region must not be empty (us-east-1 works for MinIO)")
 	}
 	if c.Storage.S3.Bucket == "" {
-		fail("storage.s3.bucket must not be empty when storage.engine=s3")
+		fail("storage.s3.bucket must not be empty")
 	}
 	if (c.Storage.S3.AccessKeyID == "") != (c.Storage.S3.SecretAccessKey == "") {
 		fail("storage.s3.access_key_id and secret_access_key must be both set or both empty (empty = default AWS credential chain)")
@@ -412,7 +413,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.issuer", "identity")
 	v.SetDefault("auth.jwks_url", "http://localhost:8080/.well-known/jwks.json")
 
-	v.SetDefault("storage.engine", "local")
 	v.SetDefault("storage.s3.endpoint", "")
 	v.SetDefault("storage.s3.region", "")
 	v.SetDefault("storage.s3.access_key_id", "")

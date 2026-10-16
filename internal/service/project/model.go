@@ -15,8 +15,9 @@ type UpdateInput struct {
 }
 
 type PlaceMemberInput struct {
-	UserID uuid.UUID
-	RoleID uuid.UUID
+	UserID          uuid.UUID
+	RoleID          uuid.UUID
+	ExpectedVersion *int64
 }
 
 type Project struct {
@@ -33,4 +34,5 @@ type Member struct {
 	RoleName  string    `json:"role_name"`
 	IsSystem  bool      `json:"role_is_system"`
 	CreatedAt time.Time `json:"created_at"`
+	Version   int64     `json:"version"`
 }

@@ -14,16 +14,23 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 
 	"github.com/disillusioned-labs/expense/internal/constant"
+	"github.com/disillusioned-labs/expense/internal/contract"
 	"github.com/disillusioned-labs/expense/internal/repository"
 	"github.com/disillusioned-labs/expense/internal/service"
 	"github.com/disillusioned-labs/platform/pgutil"
 )
 
 var tracer = otel.Tracer("service/ocrconsumer")
+
+var (
+	ErrWriteAccessDenied   = errors.New("expense write access denied")
+	ErrIdentityUnavailable = errors.New("identity write access unavailable")
+)
 
 const (
 	EventTransactionCreated = "transaction.created"
@@ -57,12 +64,13 @@ type Service interface {
 }
 
 type ocrConsumerService struct {
-	repo repository.Store
-	log  *slog.Logger
+	repo     repository.Store
+	identity contract.IdentityClient
+	log      *slog.Logger
 }
 
-func NewService(repo repository.Store, log *slog.Logger) Service {
-	return &ocrConsumerService{repo: repo, log: log}
+func NewService(repo repository.Store, identity contract.IdentityClient, log *slog.Logger) Service {
+	return &ocrConsumerService{repo: repo, identity: identity, log: log}
 }
 
 // ParseProcessed decodes a raw routed record value. A decode error means the
@@ -116,6 +124,37 @@ func (s *ocrConsumerService) Handle(ctx context.Context, msg ProcessedMessage) e
 	ctx, span := tracer.Start(ctx, "OcrConsumer.Handle")
 	defer span.End()
 
+	doc, err := s.repo.GetDocumentForProcessing(ctx, msg.ExternalRef)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "load document before authorization failed")
+		s.log.ErrorContext(ctx, "load document before authorization failed", "error", err, "document_id", msg.ExternalRef)
+		return err
+	}
+	if doc.OcrStatus != constant.OCRStatusPending {
+		return nil
+	}
+
+	lease, err := s.identity.HoldExpenseWriteAccess(ctx, doc.OrganizationID, doc.UploadedBy)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "identity write access unavailable")
+		return fmt.Errorf("%w: %v", ErrIdentityUnavailable, err)
+	}
+	if lease.Context == nil || lease.Release == nil {
+		lease.Close()
+		return ErrIdentityUnavailable
+	}
+	defer lease.Close()
+	if lease.IsDeleted || lease.IsFrozen || !lease.MemberActive || !lease.ServiceAllowed {
+		span.AddEvent("OCR result deferred because organization write access changed")
+		return ErrWriteAccessDenied
+	}
+	ctx = lease.Context
+
 	// Claim first: only one delivery may drive the document out of
 	// 'pending', so redeliveries and stale events claim zero rows and exit.
 	// This database-level claim is the consumer's dedupe - at-least-once
@@ -133,8 +172,11 @@ func (s *ocrConsumerService) Handle(ctx context.Context, msg ProcessedMessage) e
 		return nil
 	}
 
-	doc, err := s.repo.GetDocumentForProcessing(ctx, msg.ExternalRef)
+	doc, err = s.repo.GetDocumentForProcessing(ctx, msg.ExternalRef)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "load document failed")
 		s.log.ErrorContext(ctx, "load document failed", "error", err, "document_id", msg.ExternalRef)
@@ -169,7 +211,7 @@ func (s *ocrConsumerService) Handle(ctx context.Context, msg ProcessedMessage) e
 	if doc.TransactionID != nil {
 		return s.attach(ctx, doc, *doc.TransactionID, item, msg.Status, data)
 	}
-	return s.createDraft(ctx, doc, item, msg.Status, data)
+	return s.createDraft(ctx, doc, item, data)
 }
 
 // attach appends the OCR line item to a draft the document was already bound
@@ -180,6 +222,7 @@ func (s *ocrConsumerService) attach(ctx context.Context, doc repository.GetDocum
 	ctx, span := tracer.Start(ctx, "OcrConsumer.attach")
 	defer span.End()
 
+	processed := false
 	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
 		locked, err := q.LockTransaction(ctx, transactionID)
 		if err != nil {
@@ -188,6 +231,21 @@ func (s *ocrConsumerService) attach(ctx context.Context, doc repository.GetDocum
 		if locked.DeletedAt.Valid {
 			return service.ErrNotFound
 		}
+		current, err := q.GetDocumentForProcessing(ctx, doc.ID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		if current.OcrStatus != constant.OCRStatusProcessing || current.TransactionID == nil || *current.TransactionID != transactionID {
+			return nil
+		}
+		if current.OrganizationID != locked.OrganizationID {
+			return service.ErrNotFound
+		}
+		doc = current
+		processed = true
 		if locked.Status != constant.StatusDraft || item == nil {
 			_, err := q.CompleteDocumentOCR(ctx, repository.CompleteDocumentOCRParams{
 				ID: doc.ID, OcrStatus: constant.OCRStatusNeedsReview, OcrData: data,
@@ -220,6 +278,9 @@ func (s *ocrConsumerService) attach(ctx context.Context, doc repository.GetDocum
 		s.log.ErrorContext(ctx, "attach ocr items failed", "error", err, "document_id", doc.ID)
 		return err
 	}
+	if !processed {
+		return nil
+	}
 	if status == StatusCompleted {
 		s.log.InfoContext(ctx, "ocr item attached to draft", "document_id", doc.ID, "transaction_id", transactionID)
 	} else {
@@ -231,7 +292,7 @@ func (s *ocrConsumerService) attach(ctx context.Context, doc repository.GetDocum
 // createDraft auto-creates the transaction the OCR result describes. The
 // draft is attributed to the first uploader via the snapshot frozen on the
 // document row, because the consumer runs without an actor.
-func (s *ocrConsumerService) createDraft(ctx context.Context, doc repository.GetDocumentForProcessingRow, item *OCRItem, status string, data []byte) error {
+func (s *ocrConsumerService) createDraft(ctx context.Context, doc repository.GetDocumentForProcessingRow, item *OCRItem, data []byte) error {
 	ctx, span := tracer.Start(ctx, "OcrConsumer.createDraft")
 	defer span.End()
 
@@ -252,7 +313,21 @@ func (s *ocrConsumerService) createDraft(ctx context.Context, doc repository.Get
 	}
 
 	var created repository.Transaction
+	processed := false
 	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		current, err := q.GetDocumentForProcessing(ctx, doc.ID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		if current.OcrStatus != constant.OCRStatusProcessing || current.TransactionID != nil {
+			return nil
+		}
+		doc = current
+		processed = true
+
 		row, err := q.CreateTransaction(ctx, repository.CreateTransactionParams{
 			OrganizationID: doc.OrganizationID,
 			ProjectID:      doc.ProjectID,
@@ -292,6 +367,9 @@ func (s *ocrConsumerService) createDraft(ctx context.Context, doc repository.Get
 		span.SetStatus(codes.Error, "create draft failed")
 		s.log.ErrorContext(ctx, "create draft failed", "error", err, "document_id", doc.ID)
 		return err
+	}
+	if !processed {
+		return nil
 	}
 	s.log.InfoContext(ctx, "draft transaction created from ocr",
 		"document_id", doc.ID, "transaction_id", created.ID, "total_amount", created.TotalAmount)

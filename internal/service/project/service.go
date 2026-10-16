@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 
@@ -14,7 +15,6 @@ import (
 	"github.com/disillusioned-labs/expense/internal/constant"
 	"github.com/disillusioned-labs/expense/internal/repository"
 	"github.com/disillusioned-labs/expense/internal/service"
-	roleservice "github.com/disillusioned-labs/expense/internal/service/role"
 )
 
 var tracer = otel.Tracer("service/project")
@@ -36,12 +36,11 @@ type ProjectService interface {
 type projectService struct {
 	repo  repository.Store
 	authz *authz.Authorizer
-	roles roleservice.RoleService
 	log   *slog.Logger
 }
 
-func NewProjectService(repo repository.Store, authorizer *authz.Authorizer, roles roleservice.RoleService, log *slog.Logger) ProjectService {
-	return &projectService{repo: repo, authz: authorizer, roles: roles, log: log}
+func NewProjectService(repo repository.Store, authorizer *authz.Authorizer, log *slog.Logger) ProjectService {
+	return &projectService{repo: repo, authz: authorizer, log: log}
 }
 
 func toProject(p repository.Project) Project {
@@ -61,7 +60,6 @@ func (s *projectService) Create(ctx context.Context, actor authz.Actor, in Creat
 	name := in.Name
 
 	var created repository.Project
-
 	err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
 		p, err := q.CreateProject(ctx, repository.CreateProjectParams{
 			OrganizationID: actor.OrgID,
@@ -69,54 +67,39 @@ func (s *projectService) Create(ctx context.Context, actor authz.Actor, in Creat
 			CreatedBy:      actor.UserID,
 		})
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "create project failed")
-			s.log.ErrorContext(ctx, "create project failed", "error", err)
 			return err
 		}
-
 		created = p
-		return nil
-	})
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "create project failed")
-		s.log.ErrorContext(ctx, "create project failed", "error", err)
-		return Project{}, err
-	}
-
-	// Seed system roles for the new project, then assign admin to creator.
-	if err := s.roles.EnsureSeed(ctx, actor, created.ID); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "ensure seed failed")
-		s.log.ErrorContext(ctx, "ensure seed failed", "error", err)
-		return Project{}, err
-	}
-
-	admin, err := s.repo.GetRoleByName(ctx, repository.GetRoleByNameParams{
-		ProjectID: created.ID, Name: constant.SystemRoleAdmin,
-	})
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "get role by name failed")
-		s.log.ErrorContext(ctx, "get role by name failed", "error", err)
-		return Project{}, err
-	}
-
-	if _, err := s.repo.UpsertProjectMember(ctx, repository.UpsertProjectMemberParams{
-		OrganizationID: actor.OrgID,
-		ProjectID:      created.ID,
-		UserID:         actor.UserID,
-		RoleID:         admin.ID,
-	}); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "upsert project member failed")
-		s.log.ErrorContext(ctx, "upsert project member failed", "error", err)
-		return Project{}, err
-	}
-
-	err = s.repo.ExecTx(ctx, func(q repository.Querier) error {
-		return service.Emit(ctx, q, "project", created.ID, EventProjectCreated, constant.TopicAudit, ProjectCreatedEvent{
+		for roleName, actions := range constant.SystemRoleActions() {
+			role, err := q.CreateRole(ctx, repository.CreateRoleParams{
+				ProjectID: p.ID, Name: roleName, IsSystem: true, CreatedBy: actor.UserID,
+			})
+			if err != nil {
+				return err
+			}
+			for _, action := range actions {
+				if err := q.AddRolePermission(ctx, repository.AddRolePermissionParams{RoleID: role.ID, Action: string(action)}); err != nil {
+					return err
+				}
+			}
+		}
+		if err := q.CreateDefaultApprovalRule(ctx, repository.CreateDefaultApprovalRuleParams{
+			OrganizationID: actor.OrgID,
+			ApproverID:     actor.UserID,
+		}); err != nil {
+			return err
+		}
+		admin, err := q.GetRoleByName(ctx, repository.GetRoleByNameParams{ProjectID: p.ID, Name: constant.SystemRoleAdmin})
+		if err != nil {
+			return err
+		}
+		if _, err := q.UpsertProjectMember(ctx, repository.UpsertProjectMemberParams{
+			OrganizationID: actor.OrgID, ProjectID: p.ID, UserID: actor.UserID,
+			RoleID: admin.ID, ExpectedVersion: pgtype.Int8{},
+		}); err != nil {
+			return err
+		}
+		return service.Emit(ctx, q, "project", p.ID, EventProjectCreated, constant.TopicAudit, ProjectCreatedEvent{
 			OrganizationID: actor.OrgID, ProjectID: created.ID, ActorID: actor.UserID,
 		})
 	})
@@ -228,24 +211,23 @@ func (s *projectService) Update(ctx context.Context, actor authz.Actor, id uuid.
 	defer span.End()
 
 	name := in.Name
-	p, err := s.repo.UpdateProjectName(ctx, repository.UpdateProjectNameParams{
-		ID: id, Name: name, OrganizationID: actor.OrgID,
+	var p repository.Project
+	err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		var err error
+		p, err = q.UpdateProjectName(ctx, repository.UpdateProjectNameParams{
+			ID: id, Name: name, OrganizationID: actor.OrgID,
+		})
+		if err != nil {
+			return err
+		}
+		return service.Emit(ctx, q, "project", id, EventProjectUpdated, constant.TopicAudit, ProjectUpdatedEvent{
+			OrganizationID: actor.OrgID, ProjectID: id, ActorID: actor.UserID,
+		})
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Project{}, service.ErrNotFound
 		}
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "update project name failed")
-		s.log.ErrorContext(ctx, "update project name failed", "error", err)
-		return Project{}, err
-	}
-
-	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
-		return service.Emit(ctx, q, "project", id, EventProjectUpdated, constant.TopicAudit, ProjectUpdatedEvent{
-			OrganizationID: actor.OrgID, ProjectID: id, ActorID: actor.UserID,
-		})
-	}); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "emit project updated failed")
 		s.log.ErrorContext(ctx, "emit project updated failed", "error", err)
@@ -259,29 +241,39 @@ func (s *projectService) Delete(ctx context.Context, actor authz.Actor, id uuid.
 	ctx, span := tracer.Start(ctx, "ProjectService.Delete")
 	defer span.End()
 
-	count, err := s.repo.CountProjectTransactions(ctx, id)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "count project transactions failed")
-		s.log.ErrorContext(ctx, "count project transactions failed", "error", err)
-		return err
-	}
-
-	if count > 0 {
-		return service.ErrProjectHasTransactions
-	}
-	rows, err := s.repo.SoftDeleteProject(ctx, repository.SoftDeleteProjectParams{ID: id, OrganizationID: actor.OrgID})
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "soft delete project failed")
-		s.log.ErrorContext(ctx, "soft delete project failed", "error", err)
-		return err
-	}
-
-	if rows == 0 {
+	err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		if _, err := q.LockProjectForDelete(ctx, repository.LockProjectForDeleteParams{
+			ID: id, OrganizationID: actor.OrgID,
+		}); err != nil {
+			return err
+		}
+		count, err := q.CountProjectTransactions(ctx, id)
+		if err != nil {
+			return err
+		}
+		if count > 0 {
+			return service.ErrProjectHasTransactions
+		}
+		rows, err := q.SoftDeleteProject(ctx, repository.SoftDeleteProjectParams{ID: id, OrganizationID: actor.OrgID})
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return service.ErrNotFound
+		}
+		return service.Emit(ctx, q, "project", id, EventProjectDeleted, constant.TopicAudit, ProjectDeletedEvent{
+			OrganizationID: actor.OrgID, ProjectID: id, ActorID: actor.UserID,
+		})
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
 		return service.ErrNotFound
 	}
-	return nil
+	if err != nil && !errors.Is(err, service.ErrProjectHasTransactions) && !errors.Is(err, service.ErrNotFound) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "delete project failed")
+		s.log.ErrorContext(ctx, "delete project failed", "error", err)
+	}
+	return err
 }
 
 func (s *projectService) Archive(ctx context.Context, actor authz.Actor, id uuid.UUID) (Project, error) {
@@ -354,6 +346,16 @@ func (s *projectService) PlaceMember(ctx context.Context, actor authz.Actor, pro
 	if p.ArchivedAt.Valid {
 		return Member{}, service.ErrProjectArchived
 	}
+	active, err := s.authz.IsMemberActiveStrict(ctx, actor, userID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "verify organization membership failed")
+		s.log.ErrorContext(ctx, "verify organization membership failed", "error", err)
+		return Member{}, err
+	}
+	if !active {
+		return Member{}, service.ErrProjectMemberNotActive
+	}
 	role, err := s.repo.GetRole(ctx, repository.GetRoleParams{ID: roleID, ProjectID: projectID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -365,25 +367,43 @@ func (s *projectService) PlaceMember(ctx context.Context, actor authz.Actor, pro
 		return Member{}, err
 	}
 
-	m, err := s.repo.UpsertProjectMember(ctx, repository.UpsertProjectMemberParams{
-		OrganizationID: actor.OrgID,
-		ProjectID:      projectID,
-		UserID:         userID,
-		RoleID:         roleID,
-	})
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "place member failed")
-		s.log.ErrorContext(ctx, "place member failed", "error", err)
-		return Member{}, err
+	expectedVersion := pgtype.Int8{}
+	if in.ExpectedVersion != nil {
+		expectedVersion = pgtype.Int8{Int64: *in.ExpectedVersion, Valid: true}
 	}
-
-	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+	var m repository.ProjectMember
+	err = s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		locked, err := q.LockProjectForDelete(ctx, repository.LockProjectForDeleteParams{
+			ID: projectID, OrganizationID: actor.OrgID,
+		})
+		if err != nil {
+			return err
+		}
+		if locked.ArchivedAt.Valid {
+			return service.ErrProjectArchived
+		}
+		m, err = q.UpsertProjectMember(ctx, repository.UpsertProjectMemberParams{
+			OrganizationID:  actor.OrgID,
+			ProjectID:       projectID,
+			UserID:          userID,
+			RoleID:          roleID,
+			ExpectedVersion: expectedVersion,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return service.ErrProjectMemberChanged
+			}
+			return err
+		}
 		return service.Emit(ctx, q, "project_member", projectID, EventProjectMemberPlaced, constant.TopicAudit, ProjectMemberPlacedEvent{
 			OrganizationID: actor.OrgID, ProjectID: projectID,
 			UserID: userID, RoleID: roleID, ActorID: actor.UserID,
 		})
-	}); err != nil {
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Member{}, service.ErrNotFound
+	}
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "place member failed")
 		s.log.ErrorContext(ctx, "place member failed", "error", err)
@@ -396,6 +416,7 @@ func (s *projectService) PlaceMember(ctx context.Context, actor authz.Actor, pro
 		RoleName:  role.Name,
 		IsSystem:  role.IsSystem,
 		CreatedAt: m.CreatedAt,
+		Version:   m.Version,
 	}, nil
 }
 
@@ -403,26 +424,36 @@ func (s *projectService) RemoveMember(ctx context.Context, actor authz.Actor, pr
 	ctx, span := tracer.Start(ctx, "ProjectService.RemoveMember")
 	defer span.End()
 
-	rows, err := s.repo.DeleteProjectMember(ctx, repository.DeleteProjectMemberParams{
-		ProjectID: projectID,
-		UserID:    userID,
-	})
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "delete project member failed")
-		s.log.ErrorContext(ctx, "delete project member failed", "error", err)
-		return err
-	}
-
-	if rows == 0 {
-		return service.ErrNotFound
-	}
-	return s.repo.ExecTx(ctx, func(q repository.Querier) error {
+	err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		if _, err := q.LockProjectForDelete(ctx, repository.LockProjectForDeleteParams{
+			ID: projectID, OrganizationID: actor.OrgID,
+		}); err != nil {
+			return err
+		}
+		rows, err := q.DeleteProjectMember(ctx, repository.DeleteProjectMemberParams{
+			ProjectID: projectID,
+			UserID:    userID,
+		})
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return service.ErrNotFound
+		}
 		return service.Emit(ctx, q, "project_member", projectID, EventProjectMemberRemoved, constant.TopicAudit, ProjectMemberRemovedEvent{
 			OrganizationID: actor.OrgID, ProjectID: projectID,
 			UserID: userID, ActorID: actor.UserID,
 		})
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return service.ErrNotFound
+	}
+	if err != nil && !errors.Is(err, service.ErrNotFound) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "delete project member failed")
+		s.log.ErrorContext(ctx, "delete project member failed", "error", err)
+	}
+	return err
 }
 
 func (s *projectService) ListMembers(ctx context.Context, actor authz.Actor, projectID uuid.UUID) ([]Member, error) {
@@ -458,6 +489,7 @@ func (s *projectService) ListMembers(ctx context.Context, actor authz.Actor, pro
 			RoleName:  m.RoleName,
 			IsSystem:  m.RoleIsSystem,
 			CreatedAt: m.CreatedAt,
+			Version:   m.Version,
 		})
 	}
 	return out, nil

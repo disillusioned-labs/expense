@@ -26,6 +26,12 @@ WHERE id = $1 AND organization_id = $3 AND deleted_at IS NULL RETURNING
 -- name: CountProjectTransactions :one
 SELECT COUNT(*) FROM transactions WHERE project_id = $1 AND deleted_at IS NULL;
 
+-- name: LockProjectForDelete :one
+SELECT id, organization_id, name, created_by, created_at, updated_at, deleted_at, archived_at
+FROM projects
+WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL
+FOR UPDATE;
+
 -- name: SoftDeleteProject :execrows
 UPDATE projects
 SET deleted_at = now()
@@ -47,11 +53,12 @@ WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL AND archived_at IS
 INSERT INTO project_members (organization_id, project_id, user_id, role_id)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (project_id, user_id)
-    DO UPDATE SET role_id = EXCLUDED.role_id RETURNING
-        organization_id, project_id, user_id, role_id, created_at, updated_at;
+    DO UPDATE SET role_id = EXCLUDED.role_id, version = project_members.version + 1
+    WHERE project_members.version = sqlc.narg('expected_version')::bigint
+RETURNING organization_id, project_id, user_id, role_id, created_at, updated_at, version;
 
 -- name: GetProjectMember :one
-SELECT organization_id, project_id, user_id, role_id, created_at, updated_at
+SELECT organization_id, project_id, user_id, role_id, created_at, updated_at, version
 FROM project_members
 WHERE project_id = $1 AND user_id = $2;
 
@@ -60,7 +67,7 @@ DELETE FROM project_members WHERE project_id = $1 AND user_id = $2;
 
 -- name: ListProjectMembers :many
 SELECT pm.organization_id, pm.project_id, pm.user_id, pm.role_id, pm.created_at, pm.updated_at,
-       r.name AS role_name, r.is_system AS role_is_system
+       pm.version, r.name AS role_name, r.is_system AS role_is_system
 FROM project_members pm
          JOIN roles r ON r.id = pm.role_id AND r.deleted_at IS NULL
 WHERE pm.project_id = $1

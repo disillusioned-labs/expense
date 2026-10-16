@@ -76,16 +76,17 @@ SELECT t.id, t.description, t.total_amount, t.currency, t.project_id,
 FROM approvals a
          JOIN transactions t ON t.id = a.transaction_id
          JOIN projects p ON p.id = t.project_id
-WHERE t.organization_id = $1
+WHERE t.organization_id = sqlc.arg('organization_id')
+  AND t.project_id = ANY(sqlc.arg(project_ids)::uuid[])
   AND t.status = 'pending_approval'
   AND t.deleted_at IS NULL
   AND a.activated_at IS NOT NULL
   AND a.cancelled_at IS NULL
   AND NOT EXISTS (SELECT 1 FROM approval_decisions d WHERE d.approval_id = a.id)
-  AND a.activated_at <= $2
+  AND a.activated_at <= sqlc.arg('activated_at')
 GROUP BY t.id, p.name
 ORDER BY waiting_since ASC
-LIMIT $3 OFFSET $4;
+LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
 
 -- name: ListStaleActiveApprovals :many
 -- Active (undecided) approval steps waiting longer than the cutoff, across

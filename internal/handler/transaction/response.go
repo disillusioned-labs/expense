@@ -34,6 +34,7 @@ type ItemResponse struct {
 type TransactionResponse struct {
 	ID            uuid.UUID          `json:"id"`
 	Status        string             `json:"status"`
+	Version       int64              `json:"version"`
 	TotalAmount   int64              `json:"total_amount"`
 	Currency      string             `json:"currency"`
 	Category      *string            `json:"category"`
@@ -59,6 +60,7 @@ func toTransactionResponse(t transactionservice.Transaction, items []transaction
 	return TransactionResponse{
 		ID:            t.ID,
 		Status:        t.Status,
+		Version:       t.Version,
 		TotalAmount:   t.TotalAmount,
 		Currency:      t.Currency,
 		Category:      t.Category,

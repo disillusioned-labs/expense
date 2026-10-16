@@ -16,7 +16,7 @@ import (
 const attachDocumentToTransaction = `-- name: AttachDocumentToTransaction :execrows
 UPDATE documents
 SET transaction_id = $2, ocr_status = $3, ocr_data = $4, ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing'
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL
 `
 
 type AttachDocumentToTransactionParams struct {
@@ -60,7 +60,7 @@ func (q *Queries) ClaimDocumentForOCR(ctx context.Context, id uuid.UUID) (int64,
 const completeDocumentOCR = `-- name: CompleteDocumentOCR :execrows
 UPDATE documents
 SET ocr_status = $2, ocr_data = $3, ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing'
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL
 `
 
 type CompleteDocumentOCRParams struct {
@@ -160,7 +160,7 @@ func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) 
 const failDocumentOCR = `-- name: FailDocumentOCR :execrows
 UPDATE documents
 SET ocr_status = 'failed', ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing'
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL
 `
 
 func (q *Queries) FailDocumentOCR(ctx context.Context, id uuid.UUID) (int64, error) {
@@ -240,6 +240,7 @@ SELECT d.id, d.project_id, d.transaction_id, d.storage_path, d.file_name, d.file
 FROM documents d
          JOIN projects p ON p.id = d.project_id
 WHERE d.id = $1 AND d.deleted_at IS NULL
+FOR UPDATE OF d
 `
 
 type GetDocumentForProcessingRow struct {
@@ -263,6 +264,9 @@ type GetDocumentForProcessingRow struct {
 	OrganizationID  uuid.UUID          `json:"organization_id"`
 }
 
+// This row lock serializes OCR attachment/draft creation with document delete.
+// OCR creation locks document then inserts a transaction; delete locks a known
+// transaction first, then the document, and locks a newly linked draft second.
 func (q *Queries) GetDocumentForProcessing(ctx context.Context, id uuid.UUID) (GetDocumentForProcessingRow, error) {
 	row := q.db.QueryRow(ctx, getDocumentForProcessing, id)
 	var i GetDocumentForProcessingRow

@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -15,8 +16,8 @@ import (
 
 var tracer = otel.Tracer("contract/identity")
 
-// grpcIdentityClient wraps the identity gRPC client with domain types,
-// fallback logic, and observability.
+// grpcIdentityClient wraps the identity gRPC client with domain types and
+// observability.
 type grpcIdentityClient struct {
 	client identitypb.IdentityServiceClient
 	log    *slog.Logger
@@ -45,11 +46,33 @@ func (c *grpcIdentityClient) IsMemberActive(ctx context.Context, orgID, userID u
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gRPC call failed")
-		c.log.WarnContext(ctx, "identity gRPC unavailable, falling back to claims",
+		c.log.WarnContext(ctx, "identity membership could not be verified",
 			"error", err, "user_id", userID, "org_id", orgID)
-		return true, "", nil
+		return false, "", err
 	}
 
+	return resp.IsActive, resp.Role, nil
+}
+
+func (c *grpcIdentityClient) IsMemberActiveStrict(ctx context.Context, orgID, userID uuid.UUID) (bool, string, error) {
+	ctx, span := tracer.Start(ctx, "IdentityClient.IsMemberActiveStrict")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("organization.id", orgID.String()),
+		attribute.String("user.id", userID.String()),
+	)
+	resp, err := c.client.IsMemberActive(ctx, &identitypb.IsMemberActiveRequest{
+		OrganizationId: orgID.String(),
+		UserId:         userID.String(),
+	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "strict membership check failed")
+		c.log.WarnContext(ctx, "identity membership could not be verified",
+			"error", err, "user_id", userID, "org_id", orgID)
+		return false, "", err
+	}
 	return resp.IsActive, resp.Role, nil
 }
 
@@ -69,9 +92,9 @@ func (c *grpcIdentityClient) GetMemberRole(ctx context.Context, orgID, userID uu
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gRPC call failed")
-		c.log.WarnContext(ctx, "identity gRPC unavailable, falling back to claims",
+		c.log.WarnContext(ctx, "identity member role could not be verified",
 			"error", err, "user_id", userID, "org_id", orgID)
-		return "", nil
+		return "", err
 	}
 
 	return resp.Role, nil
@@ -134,9 +157,9 @@ func (c *grpcIdentityClient) GetOrgStatus(ctx context.Context, orgID uuid.UUID) 
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gRPC call failed")
-		c.log.WarnContext(ctx, "identity gRPC unavailable, falling back to claims",
+		c.log.WarnContext(ctx, "identity organization status could not be verified",
 			"error", err, "org_id", orgID)
-		return false, false, nil
+		return false, false, err
 	}
 
 	return resp.GetIsFrozen(), resp.GetIsDeleted(), nil
@@ -160,10 +183,55 @@ func (c *grpcIdentityClient) IsServiceAccessAllowed(ctx context.Context, userID,
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gRPC call failed")
-		c.log.WarnContext(ctx, "identity gRPC unavailable, falling back to claims",
+		c.log.WarnContext(ctx, "identity service access could not be verified",
 			"error", err, "user_id", userID, "org_id", orgID, "service_name", serviceName)
-		return true, nil
+		return false, err
 	}
 
 	return resp.GetAllowed(), nil
+}
+
+func (c *grpcIdentityClient) HoldExpenseWriteAccess(ctx context.Context, orgID, userID uuid.UUID) (ExpenseWriteAccessLease, error) {
+	leaseCtx, release := context.WithCancel(ctx)
+	stream, err := c.client.HoldExpenseWriteAccess(leaseCtx, &identitypb.HoldExpenseWriteAccessRequest{
+		OrganizationId: orgID.String(),
+		UserId:         userID.String(),
+	})
+	if err != nil {
+		release()
+		c.log.WarnContext(ctx, "identity write access could not be held", "error", err, "user_id", userID, "org_id", orgID)
+		return ExpenseWriteAccessLease{}, err
+	}
+
+	resp, err := stream.Recv()
+	if err != nil {
+		release()
+		c.log.WarnContext(ctx, "identity write access was not acknowledged", "error", err, "user_id", userID, "org_id", orgID)
+		return ExpenseWriteAccessLease{}, err
+	}
+	if !resp.GetReady() {
+		release()
+		return ExpenseWriteAccessLease{}, fmt.Errorf("identity write access stream did not acquire a lease")
+	}
+
+	go func() {
+		for {
+			if _, err := stream.Recv(); err != nil {
+				if leaseCtx.Err() == nil {
+					c.log.WarnContext(leaseCtx, "identity write access lease ended unexpectedly", "error", err, "user_id", userID, "org_id", orgID)
+				}
+				release()
+				return
+			}
+		}
+	}()
+
+	return ExpenseWriteAccessLease{
+		Context:        leaseCtx,
+		MemberActive:   resp.GetMemberActive(),
+		ServiceAllowed: resp.GetServiceAllowed(),
+		IsFrozen:       resp.GetOrganizationFrozen(),
+		IsDeleted:      resp.GetOrganizationDeleted(),
+		Release:        release,
+	}, nil
 }

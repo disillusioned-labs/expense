@@ -108,7 +108,12 @@ func runOCRConsumer(
 	log *slog.Logger,
 ) error {
 	dlq := kafka.NewDLQPublisher(producer, cfg.Kafka.Consumer.DLQTopic, log)
-	svc := ocrconsumer.NewService(repo, log)
+	identityClient, closeIdentity, err := newIdentityClient(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	defer closeIdentity()
+	svc := ocrconsumer.NewService(repo, identityClient, log)
 
 	for {
 		records, err := consumer.Poll(ctx)
@@ -187,6 +192,13 @@ func handleOCRRecord(ctx context.Context, svc ocrconsumer.Service, dlq *kafka.DL
 		return deadLetter(ctx, dlq, rec, err, log)
 	}
 	if err := svc.Handle(processCtx, msg); err != nil {
+		if errors.Is(err, ocrconsumer.ErrWriteAccessDenied) {
+			log.InfoContext(ctx, "OCR result deferred until organization write access is restored", "event_id", msg.EventID)
+			return nil
+		}
+		if errors.Is(err, ocrconsumer.ErrIdentityUnavailable) {
+			return err
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(processCtx.Err(), context.Canceled) {
 			return err
 		}

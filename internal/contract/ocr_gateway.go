@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 
 	gatewaypb "github.com/disillusioned-labs/ocr-gateway/contract/ocr/gateway/v1"
+
 	platformgrpc "github.com/disillusioned-labs/platform/grpc"
 
 	"github.com/disillusioned-labs/expense/internal/ocr"

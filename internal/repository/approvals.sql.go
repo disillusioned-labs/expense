@@ -196,22 +196,24 @@ FROM approvals a
          JOIN transactions t ON t.id = a.transaction_id
          JOIN projects p ON p.id = t.project_id
 WHERE t.organization_id = $1
+  AND t.project_id = ANY($2::uuid[])
   AND t.status = 'pending_approval'
   AND t.deleted_at IS NULL
   AND a.activated_at IS NOT NULL
   AND a.cancelled_at IS NULL
   AND NOT EXISTS (SELECT 1 FROM approval_decisions d WHERE d.approval_id = a.id)
-  AND a.activated_at <= $2
+  AND a.activated_at <= $3
 GROUP BY t.id, p.name
 ORDER BY waiting_since ASC
-LIMIT $3 OFFSET $4
+LIMIT $5 OFFSET $4
 `
 
 type ListAgingTransactionsParams struct {
 	OrganizationID uuid.UUID          `json:"organization_id"`
+	ProjectIds     []uuid.UUID        `json:"project_ids"`
 	ActivatedAt    pgtype.Timestamptz `json:"activated_at"`
-	Limit          int32              `json:"limit"`
 	Offset         int32              `json:"offset"`
+	Limit          int32              `json:"limit"`
 }
 
 type ListAgingTransactionsRow struct {
@@ -232,9 +234,10 @@ type ListAgingTransactionsRow struct {
 func (q *Queries) ListAgingTransactions(ctx context.Context, arg ListAgingTransactionsParams) ([]ListAgingTransactionsRow, error) {
 	rows, err := q.db.Query(ctx, listAgingTransactions,
 		arg.OrganizationID,
+		arg.ProjectIds,
 		arg.ActivatedAt,
-		arg.Limit,
 		arg.Offset,
+		arg.Limit,
 	)
 	if err != nil {
 		return nil, err

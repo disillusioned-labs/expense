@@ -50,10 +50,12 @@ FROM approval_rules
 WHERE organization_id = $1 AND project_id IS NULL AND deleted_at IS NULL
 ORDER BY step ASC, created_at ASC;
 
--- name: CreateDefaultApprovalRule :one
+-- name: CreateDefaultApprovalRule :exec
 INSERT INTO approval_rules (organization_id, project_id, approver_id, step, created_by)
-VALUES ($1, NULL, $2, 1, $2) RETURNING
-    id, organization_id, project_id, approver_id, step, created_by, created_at, updated_at, deleted_at;
+VALUES ($1, NULL, $2, 1, $2)
+ON CONFLICT (organization_id, approver_id)
+    WHERE project_id IS NULL AND deleted_at IS NULL
+    DO NOTHING;
 
 -- name: ReassignApprovalRules :execrows
 UPDATE approval_rules

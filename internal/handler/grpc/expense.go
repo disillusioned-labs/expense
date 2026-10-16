@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/disillusioned-labs/expense/internal/authz"
 	"github.com/disillusioned-labs/expense/internal/service"
 	approvalservice "github.com/disillusioned-labs/expense/internal/service/approval"
 	expensepb "github.com/disillusioned-labs/platform/contract/expense"
@@ -27,12 +28,13 @@ var tracer = otel.Tracer("handler/grpc")
 // ExpenseServer adapts the approval service to the ExpenseService proto.
 type ExpenseServer struct {
 	expensepb.UnimplementedExpenseServiceServer
-	approvals approvalservice.ApprovalService
-	log       *slog.Logger
+	approvals  approvalservice.ApprovalService
+	authorizer *authz.Authorizer
+	log        *slog.Logger
 }
 
-func NewExpenseServer(approvals approvalservice.ApprovalService, log *slog.Logger) *ExpenseServer {
-	return &ExpenseServer{approvals: approvals, log: log}
+func NewExpenseServer(approvals approvalservice.ApprovalService, authorizer *authz.Authorizer, log *slog.Logger) *ExpenseServer {
+	return &ExpenseServer{approvals: approvals, authorizer: authorizer, log: log}
 }
 
 // CheckApproverAssignments answers identity's pre-removal check: the caller
@@ -94,6 +96,16 @@ func (s *ExpenseServer) ReassignApproverRules(
 	actorID, err := uuid.Parse(req.GetActorId())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid actor_id")
+	}
+
+	lease, err := s.authorizer.HoldExpenseWriteAccess(ctx, authz.Actor{OrgID: orgID, UserID: actorID})
+	if err != nil {
+		return nil, writeServiceErr(ctx, err)
+	}
+	defer lease.Close()
+	ctx = lease.Context
+	if err := s.authorizer.CheckAdmin(ctx, authz.Actor{OrgID: orgID, UserID: actorID}); err != nil {
+		return nil, writeServiceErr(ctx, err)
 	}
 
 	reassigned, err := s.approvals.ReassignRules(ctx, orgID, fromID, toID, actorID)

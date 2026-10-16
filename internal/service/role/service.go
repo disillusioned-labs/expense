@@ -118,10 +118,10 @@ func (s *roleService) EnsureSeed(ctx context.Context, actor authz.Actor, project
 				}
 			}
 		}
-		if _, err := q.CreateDefaultApprovalRule(ctx, repository.CreateDefaultApprovalRuleParams{
+		if err := q.CreateDefaultApprovalRule(ctx, repository.CreateDefaultApprovalRuleParams{
 			OrganizationID: actor.OrgID,
 			ApproverID:     actor.UserID,
-		}); err != nil && !service.IsUniqueViolation(err) {
+		}); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "create default approval rule failed")
 			s.log.ErrorContext(ctx, "create default approval rule failed", "error", err)
@@ -200,7 +200,7 @@ func (s *roleService) Create(ctx context.Context, actor authz.Actor, projectID u
 	}, nil
 }
 
-func (s *roleService) Get(ctx context.Context, actor authz.Actor, projectID, id uuid.UUID) (Role, error) {
+func (s *roleService) Get(ctx context.Context, _ authz.Actor, projectID, id uuid.UUID) (Role, error) {
 	ctx, span := tracer.Start(ctx, "RoleService.Get")
 	defer span.End()
 
@@ -241,7 +241,7 @@ func (s *roleService) get(ctx context.Context, projectID, id uuid.UUID) (reposit
 	return r, nil
 }
 
-func (s *roleService) List(ctx context.Context, actor authz.Actor, projectID uuid.UUID) ([]Role, error) {
+func (s *roleService) List(ctx context.Context, _ authz.Actor, projectID uuid.UUID) ([]Role, error) {
 	ctx, span := tracer.Start(ctx, "RoleService.List")
 	defer span.End()
 

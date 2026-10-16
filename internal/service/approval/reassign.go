@@ -28,11 +28,19 @@ func (s *approvalService) Aging(ctx context.Context, actor authz.Actor, days int
 	if days < 1 {
 		return nil, service.ErrInvalidAction
 	}
+	projectIDs, err := s.authz.PlacedProjectIDs(ctx, actor, constant.ActionTransactionView)
+	if err != nil {
+		return nil, err
+	}
+	if len(projectIDs) == 0 {
+		return []AgingItem{}, nil
+	}
 
 	cutoff := pgtype.Timestamptz{Time: time.Now().AddDate(0, 0, -days), Valid: true}
 	rows, err := s.repo.ListAgingTransactions(ctx, repository.ListAgingTransactionsParams{
 		OrganizationID: actor.OrgID,
 		ActivatedAt:    cutoff,
+		ProjectIds:     projectIDs,
 		Limit:          limit,
 		Offset:         offset,
 	})

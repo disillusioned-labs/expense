@@ -15,7 +15,8 @@ type UpdateRequest struct {
 }
 
 type PlaceMemberRequest struct {
-	RoleID uuid.UUID `json:"role_id" validate:"required"`
+	RoleID          uuid.UUID `json:"role_id" validate:"required"`
+	ExpectedVersion *int64    `json:"expected_version" validate:"omitempty,gte=1"`
 }
 
 func (r CreateRequest) ToInput() projectservice.CreateInput {
@@ -27,5 +28,5 @@ func (r UpdateRequest) ToInput() projectservice.UpdateInput {
 }
 
 func (r PlaceMemberRequest) ToInput(userID uuid.UUID) projectservice.PlaceMemberInput {
-	return projectservice.PlaceMemberInput{UserID: userID, RoleID: r.RoleID}
+	return projectservice.PlaceMemberInput{UserID: userID, RoleID: r.RoleID, ExpectedVersion: r.ExpectedVersion}
 }

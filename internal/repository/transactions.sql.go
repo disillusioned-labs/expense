@@ -41,15 +41,22 @@ func (q *Queries) CountTransactionDocuments(ctx context.Context, transactionID *
 const createTransaction = `-- name: CreateTransaction :one
 INSERT INTO transactions (organization_id, project_id, description, currency,
                           category, created_by, created_by_name, created_by_email, created_by_role)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING
+SELECT $1, p.id, $2, $3,
+       $4, $5, $6,
+       $7, $8
+FROM projects p
+WHERE p.id = $9
+  AND p.organization_id = $1
+  AND p.deleted_at IS NULL
+FOR UPDATE
+RETURNING
     id, organization_id, project_id, status, description, total_amount, currency, category,
     created_by, created_by_name, created_by_email, created_by_role,
-    submitted_at, decided_at, created_at, updated_at, deleted_at
+    submitted_at, decided_at, created_at, updated_at, deleted_at, version
 `
 
 type CreateTransactionParams struct {
 	OrganizationID uuid.UUID   `json:"organization_id"`
-	ProjectID      uuid.UUID   `json:"project_id"`
 	Description    pgtype.Text `json:"description"`
 	Currency       string      `json:"currency"`
 	Category       pgtype.Text `json:"category"`
@@ -57,12 +64,12 @@ type CreateTransactionParams struct {
 	CreatedByName  string      `json:"created_by_name"`
 	CreatedByEmail string      `json:"created_by_email"`
 	CreatedByRole  string      `json:"created_by_role"`
+	ProjectID      uuid.UUID   `json:"project_id"`
 }
 
 func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error) {
 	row := q.db.QueryRow(ctx, createTransaction,
 		arg.OrganizationID,
-		arg.ProjectID,
 		arg.Description,
 		arg.Currency,
 		arg.Category,
@@ -70,6 +77,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		arg.CreatedByName,
 		arg.CreatedByEmail,
 		arg.CreatedByRole,
+		arg.ProjectID,
 	)
 	var i Transaction
 	err := row.Scan(
@@ -90,6 +98,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+		&i.Version,
 	)
 	return i, err
 }
@@ -97,7 +106,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 const getTransaction = `-- name: GetTransaction :one
 SELECT id, organization_id, project_id, status, description, total_amount, currency, category,
        created_by, created_by_name, created_by_email, created_by_role,
-       submitted_at, decided_at, created_at, updated_at, deleted_at
+       submitted_at, decided_at, created_at, updated_at, deleted_at, version
 FROM transactions
 WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL
 `
@@ -128,12 +137,13 @@ func (q *Queries) GetTransaction(ctx context.Context, arg GetTransactionParams) 
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+		&i.Version,
 	)
 	return i, err
 }
 
 const listTransactions = `-- name: ListTransactions :many
-SELECT t.id, t.organization_id, t.project_id, t.status, t.description, t.total_amount, t.currency,
+SELECT t.id, t.organization_id, t.project_id, t.status, t.description, t.total_amount, t.currency, t.version,
        t.category, t.created_by, t.created_by_name, t.created_by_email, t.created_by_role,
        t.submitted_at, t.decided_at, t.created_at, t.updated_at,
        p.name AS project_name,
@@ -181,6 +191,7 @@ type ListTransactionsRow struct {
 	Description    pgtype.Text        `json:"description"`
 	TotalAmount    int64              `json:"total_amount"`
 	Currency       string             `json:"currency"`
+	Version        int64              `json:"version"`
 	Category       pgtype.Text        `json:"category"`
 	CreatedBy      uuid.UUID          `json:"created_by"`
 	CreatedByName  string             `json:"created_by_name"`
@@ -225,6 +236,7 @@ func (q *Queries) ListTransactions(ctx context.Context, arg ListTransactionsPara
 			&i.Description,
 			&i.TotalAmount,
 			&i.Currency,
+			&i.Version,
 			&i.Category,
 			&i.CreatedBy,
 			&i.CreatedByName,
@@ -253,7 +265,7 @@ func (q *Queries) ListTransactions(ctx context.Context, arg ListTransactionsPara
 const lockTransaction = `-- name: LockTransaction :one
 SELECT id, organization_id, project_id, status, description, total_amount, currency, category,
        created_by, created_by_name, created_by_email, created_by_role,
-       submitted_at, decided_at, created_at, updated_at, deleted_at
+       submitted_at, decided_at, created_at, updated_at, deleted_at, version
 FROM transactions
 WHERE id = $1
 FOR UPDATE
@@ -280,6 +292,7 @@ func (q *Queries) LockTransaction(ctx context.Context, id uuid.UUID) (Transactio
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+		&i.Version,
 	)
 	return i, err
 }
@@ -334,18 +347,20 @@ func (q *Queries) SubmitTransaction(ctx context.Context, id uuid.UUID) (int64, e
 const updateTransactionDraft = `-- name: UpdateTransactionDraft :one
 UPDATE transactions
 SET description = $3, currency = $4, category = $5
-WHERE id = $1 AND organization_id = $2 AND status = 'draft' AND deleted_at IS NULL RETURNING
+WHERE id = $1 AND organization_id = $2 AND status = 'draft' AND deleted_at IS NULL
+  AND version = $6 RETURNING
     id, organization_id, project_id, status, description, total_amount, currency, category,
     created_by, created_by_name, created_by_email, created_by_role,
-    submitted_at, decided_at, created_at, updated_at, deleted_at
+    submitted_at, decided_at, created_at, updated_at, deleted_at, version
 `
 
 type UpdateTransactionDraftParams struct {
-	ID             uuid.UUID   `json:"id"`
-	OrganizationID uuid.UUID   `json:"organization_id"`
-	Description    pgtype.Text `json:"description"`
-	Currency       string      `json:"currency"`
-	Category       pgtype.Text `json:"category"`
+	ID              uuid.UUID   `json:"id"`
+	OrganizationID  uuid.UUID   `json:"organization_id"`
+	Description     pgtype.Text `json:"description"`
+	Currency        string      `json:"currency"`
+	Category        pgtype.Text `json:"category"`
+	ExpectedVersion int64       `json:"expected_version"`
 }
 
 func (q *Queries) UpdateTransactionDraft(ctx context.Context, arg UpdateTransactionDraftParams) (Transaction, error) {
@@ -355,6 +370,7 @@ func (q *Queries) UpdateTransactionDraft(ctx context.Context, arg UpdateTransact
 		arg.Description,
 		arg.Currency,
 		arg.Category,
+		arg.ExpectedVersion,
 	)
 	var i Transaction
 	err := row.Scan(
@@ -375,6 +391,7 @@ func (q *Queries) UpdateTransactionDraft(ctx context.Context, arg UpdateTransact
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+		&i.Version,
 	)
 	return i, err
 }

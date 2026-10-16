@@ -6,11 +6,12 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/disillusioned-labs/platform/s3"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+
+	"github.com/disillusioned-labs/platform/s3"
 
 	"github.com/disillusioned-labs/expense/internal/authz"
 	"github.com/disillusioned-labs/expense/internal/constant"
@@ -21,6 +22,8 @@ import (
 )
 
 var tracer = otel.Tracer("service/transaction")
+
+var errTransactionChanged = service.NewError("TRANSACTION_CHANGED", 409, "transaction changed; refresh and review before saving")
 
 var Categories = []string{
 	"makan_minum", "transportasi", "material", "utilitas", "lainnya",
@@ -90,21 +93,11 @@ func insertItems(ctx context.Context, q repository.Querier, txID uuid.UUID, item
 	return err
 }
 
-func (s *transactionService) snapshot(ctx context.Context, actor authz.Actor) (uuid.UUID, string, string, string) {
-	users, err := s.identity.GetUsersInfo(ctx, []contract.UserOrgPair{
-		{UserID: actor.UserID, OrganizationID: actor.OrgID},
-	})
-	if err != nil || len(users) == 0 {
-		return actor.UserID, "unknown", "unknown", actor.Role
-	}
-	u := users[0]
-	return actor.UserID, u.Name, u.Email, u.Role
-}
-
 func toBrief(t repository.Transaction, projectName string, docCount int64) Transaction {
 	out := Transaction{
 		ID:            t.ID,
 		Status:        t.Status,
+		Version:       t.Version,
 		TotalAmount:   t.TotalAmount,
 		Currency:      t.Currency,
 		Category:      pgutil.TextPtr(t.Category),
@@ -123,6 +116,7 @@ func toBriefList(r repository.ListTransactionsRow) Transaction {
 	out := Transaction{
 		ID:            r.ID,
 		Status:        r.Status,
+		Version:       r.Version,
 		TotalAmount:   r.TotalAmount,
 		Currency:      r.Currency,
 		Category:      pgutil.TextPtr(r.Category),
@@ -341,6 +335,9 @@ func (s *transactionService) canEditDraftRow(ctx context.Context, actor authz.Ac
 	ctx, span := tracer.Start(ctx, "TransactionService.canEditDraftRow")
 	defer span.End()
 
+	if err := s.authz.Can(ctx, actor, t.ProjectID, constant.ActionTransactionView); err != nil {
+		return err
+	}
 	if t.CreatedBy == actor.UserID {
 		return nil
 	}
@@ -373,10 +370,10 @@ func (s *transactionService) Update(ctx context.Context, actor authz.Actor, id u
 		in.Currency = t.Currency
 	}
 	if in.Currency != constant.CurrencyIDR {
-		return Detail{}, err
+		return Detail{}, service.ErrCurrencyInvalid
 	}
 	if in.Category != nil && !IsValidCategory(*in.Category) {
-		return Detail{}, err
+		return Detail{}, service.ErrCategoryInvalid
 	}
 	if in.Items != nil {
 		if err := validateItems(in.Items); err != nil {
@@ -389,16 +386,34 @@ func (s *transactionService) Update(ctx context.Context, actor authz.Actor, id u
 
 	var updated repository.Transaction
 	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		locked, err := q.LockTransaction(ctx, id)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return service.ErrNotFound
+			}
+			return err
+		}
+		if locked.OrganizationID != actor.OrgID || locked.DeletedAt.Valid {
+			return service.ErrNotFound
+		}
+		if locked.Status != constant.StatusDraft {
+			return service.ErrTransactionLocked
+		}
+		if locked.Version != in.ExpectedVersion {
+			return errTransactionChanged
+		}
+
 		row, err := q.UpdateTransactionDraft(ctx, repository.UpdateTransactionDraftParams{
-			ID:             id,
-			OrganizationID: t.OrganizationID,
-			Description:    pgutil.Text(in.Description),
-			Currency:       in.Currency,
-			Category:       pgutil.Text(in.Category),
+			ID:              id,
+			OrganizationID:  t.OrganizationID,
+			Description:     pgutil.Text(in.Description),
+			Currency:        in.Currency,
+			Category:        pgutil.Text(in.Category),
+			ExpectedVersion: in.ExpectedVersion,
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return service.ErrTransactionLocked
+				return errTransactionChanged
 			}
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "update failed")

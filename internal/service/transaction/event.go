@@ -33,23 +33,3 @@ type TransactionDeletedEvent struct {
 const (
 	SourceManual = "manual"
 )
-
-const (
-	EventTransactionSubmitted = "transaction.submitted"
-	EventTransactionDecided   = "transaction.decided"
-)
-
-type TransactionSubmittedEvent struct {
-	OrganizationID uuid.UUID  `json:"organization_id"`
-	TransactionID  uuid.UUID  `json:"transaction_id"`
-	ActorID        uuid.UUID  `json:"actor_id"`
-	BatchID        *uuid.UUID `json:"batch_id,omitempty"`
-}
-
-type TransactionDecidedEvent struct {
-	OrganizationID uuid.UUID `json:"organization_id"`
-	TransactionID  uuid.UUID `json:"transaction_id"`
-	ApprovalID     uuid.UUID `json:"approval_id"`
-	Decision       string    `json:"decision"`
-	ActorID        uuid.UUID `json:"actor_id"`
-}

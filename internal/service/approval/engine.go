@@ -14,7 +14,6 @@ import (
 	"github.com/disillusioned-labs/expense/internal/contract"
 	"github.com/disillusioned-labs/expense/internal/repository"
 	"github.com/disillusioned-labs/expense/internal/service"
-	transactionservice "github.com/disillusioned-labs/expense/internal/service/transaction"
 	"github.com/disillusioned-labs/platform/pgutil"
 )
 
@@ -148,8 +147,8 @@ func (s *approvalService) submitTx(ctx context.Context, actor authz.Actor, txID 
 			}
 		}
 
-		return service.Emit(ctx, q, "transaction", t.ID, transactionservice.EventTransactionSubmitted, constant.TopicAudit,
-			transactionservice.TransactionSubmittedEvent{
+		return service.Emit(ctx, q, "transaction", t.ID, contract.EventTransactionSubmitted, constant.TopicAudit,
+			contract.TransactionSubmittedEvent{
 				OrganizationID: actor.OrgID, TransactionID: t.ID,
 				ActorID: actor.UserID,
 			})
@@ -162,6 +161,23 @@ func (s *approvalService) Submit(ctx context.Context, actor authz.Actor, transac
 
 	if err := s.authz.CheckOrgWrite(ctx, actor); err != nil {
 		return SubmitResult{}, err
+	}
+	t, err := s.repo.GetTransaction(ctx, repository.GetTransactionParams{
+		ID: transactionID, OrganizationID: actor.OrgID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return SubmitResult{}, service.ErrNotFound
+		}
+		return SubmitResult{}, err
+	}
+	if err := s.authz.Can(ctx, actor, t.ProjectID, constant.ActionTransactionView); err != nil {
+		return SubmitResult{}, err
+	}
+	if t.CreatedBy != actor.UserID {
+		if err := s.authz.CheckAdmin(ctx, actor); err != nil {
+			return SubmitResult{}, err
+		}
 	}
 	if err := s.submitTx(ctx, actor, transactionID); err != nil {
 		return SubmitResult{}, err
@@ -296,8 +312,8 @@ func (s *approvalService) Decide(ctx context.Context, actor authz.Actor, approva
 		case nextStepActivated:
 			tStatus = constant.StatusPendingApproval
 		}
-		if err := service.Emit(ctx, q, "transaction", a.TransactionID, transactionservice.EventTransactionDecided, constant.TopicAudit,
-			transactionservice.TransactionDecidedEvent{
+		if err := service.Emit(ctx, q, "transaction", a.TransactionID, contract.EventTransactionDecided, constant.TopicAudit,
+			contract.TransactionDecidedEvent{
 				OrganizationID: actor.OrgID, TransactionID: a.TransactionID,
 				ApprovalID: a.ID, Decision: decision, ActorID: actor.UserID,
 			}); err != nil {

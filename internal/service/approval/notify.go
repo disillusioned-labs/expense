@@ -19,9 +19,6 @@ import (
 const (
 	NotificationStepActivated    = "approval_step_activated"
 	NotificationDecisionReceived = "approval_decision_received"
-	// NotificationReminder is emitted by the reminder worker
-	// (internal/service/reminder), not by the approval engine.
-	NotificationReminder = "approval_reminder"
 )
 
 // StepActivatedPayload feeds the approval_step_activated templates.
@@ -41,15 +38,6 @@ type DecisionReceivedPayload struct {
 	AmountDisplay          string `json:"amount_display"`
 	Decision               string `json:"decision"` // "approved" | "rejected"
 	DeciderName            string `json:"decider_name"`
-}
-
-// ReminderPayload feeds the approval_reminder templates.
-type ReminderPayload struct {
-	ApproverName           string `json:"approver_name"`
-	TransactionID          string `json:"transaction_id"`
-	TransactionDescription string `json:"transaction_description,omitempty"`
-	AmountDisplay          string `json:"amount_display"`
-	WaitingDays            int    `json:"waiting_days"`
 }
 
 // ValidEmail guards notification targets: snapshot emails can be the literal
@@ -96,7 +84,7 @@ func notificationEvent(notificationType, recipientID, email string, payload any)
 // emitStepActivated publishes the "your turn" notification for an approver
 // whose step just went active. A snapshot email of "unknown" only removes the
 // email target; the push target (user id) is unaffected.
-func emitStepActivated(ctx context.Context, q repository.Querier, orgID, txID, approverID uuid.UUID, approverName, approverEmail, description string, total int64, currency string, step int) error {
+func emitStepActivated(ctx context.Context, q repository.Querier, _ uuid.UUID, txID, approverID uuid.UUID, approverName, approverEmail, description string, total int64, currency string, step int) error {
 	event, err := notificationEvent(NotificationStepActivated, approverID.String(), approverEmail, StepActivatedPayload{
 		ApproverName:           approverName,
 		TransactionID:          txID.String(),
@@ -112,7 +100,7 @@ func emitStepActivated(ctx context.Context, q repository.Querier, orgID, txID, a
 
 // emitDecisionReceived publishes the "a decision landed on your transaction"
 // notification to the transaction creator.
-func emitDecisionReceived(ctx context.Context, q repository.Querier, orgID, txID, creatorID uuid.UUID, creatorEmail, creatorName, description string, total int64, currency, decision, deciderName string) error {
+func emitDecisionReceived(ctx context.Context, q repository.Querier, _ uuid.UUID, txID, creatorID uuid.UUID, creatorEmail, creatorName, description string, total int64, currency, decision, deciderName string) error {
 	event, err := notificationEvent(NotificationDecisionReceived, creatorID.String(), creatorEmail, DecisionReceivedPayload{
 		CreatorName:            creatorName,
 		TransactionID:          txID.String(),

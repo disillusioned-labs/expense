@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/disillusioned-labs/expense/internal/config"
+	"github.com/disillusioned-labs/expense/internal/contract"
 	"github.com/disillusioned-labs/expense/internal/repository"
 	ocrconsumer "github.com/disillusioned-labs/expense/internal/service/ocrconsumer"
 	"github.com/disillusioned-labs/expense/internal/service/outbox"
@@ -76,15 +77,19 @@ func RunWorker(cfg *config.Config) error {
 	publisher := outbox.NewOutboxService(repo, producer, log)
 	workerID := workerIDPrefix + cfg.Service.InstanceID
 
-	// The reminder worker needs live identity data (fresh approver emails),
-	// so it only runs when it can reach identity's gRPC surface.
-	var reminder reminderservice.Service
-	if cfg.Remind.Enabled {
-		identityClient, closeIdentity, err := newIdentityClient(ctx, cfg, log)
+	// Reminders and the OCR sweeper both need live Identity state.
+	var identityClient contract.IdentityClient
+	var closeIdentity func()
+	if cfg.Remind.Enabled || cfg.Ocr.GatewayTarget != "" {
+		identityClient, closeIdentity, err = newIdentityClient(ctx, cfg, log)
 		if err != nil {
 			return err
 		}
 		defer closeIdentity()
+	}
+
+	var reminder reminderservice.Service
+	if cfg.Remind.Enabled {
 		reminder = reminderservice.NewService(repo, identityClient, cfg.Remind.ThresholdDays, cfg.Remind.BatchSize, log)
 	}
 
@@ -136,7 +141,7 @@ func RunWorker(cfg *config.Config) error {
 		}
 		defer closeGateway()
 
-		sweeper := ocrconsumer.NewSweeper(repo, gateway, log)
+		sweeper := ocrconsumer.NewSweeper(repo, gateway, identityClient, log)
 
 		g.Go(func() error {
 			ticker := time.NewTicker(cfg.Ocr.SweepInterval)

@@ -5,10 +5,12 @@ package reminder
 
 import (
 	"context"
-	"log/slog"
-	"time"
-
 	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -18,7 +20,6 @@ import (
 	"github.com/disillusioned-labs/expense/internal/contract"
 	"github.com/disillusioned-labs/expense/internal/repository"
 	"github.com/disillusioned-labs/expense/internal/service"
-	approvalserv "github.com/disillusioned-labs/expense/internal/service/approval"
 	notificationcontract "github.com/disillusioned-labs/platform/contract/notification"
 )
 
@@ -98,18 +99,18 @@ func (s *reminderService) RemindOnce(ctx context.Context) (int, error) {
 			description = r.Description.String
 		}
 		waitingDays := int(time.Since(r.ActivatedAt.Time).Hours() / 24)
-		payload, err := json.Marshal(approvalserv.ReminderPayload{
+		payload, err := json.Marshal(contract.ReminderPayload{
 			ApproverName:           u.Name,
 			TransactionID:          r.TransactionID.String(),
 			TransactionDescription: description,
-			AmountDisplay:          approvalserv.FormatAmount(r.TotalAmount, r.Currency),
+			AmountDisplay:          formatReminderAmount(r.TotalAmount, r.Currency),
 			WaitingDays:            waitingDays,
 		})
 		if err != nil {
 			return sent, err
 		}
 		targets := make([]notificationcontract.Target, 0, 2)
-		if approvalserv.ValidEmail(u.Email) {
+		if validReminderEmail(u.Email) {
 			targets = append(targets, notificationcontract.Target{
 				Channel:     notificationcontract.ChannelEmail,
 				Destination: u.Email,
@@ -120,7 +121,7 @@ func (s *reminderService) RemindOnce(ctx context.Context) (int, error) {
 			Destination: u.UserID.String(),
 		})
 		event := notificationcontract.CreatedEvent{
-			NotificationType: approvalserv.NotificationReminder,
+			NotificationType: constant.NotificationReminder,
 			Category:         notificationcontract.CategoryTransactional,
 			RecipientID:      u.UserID.String(),
 			Targets:          targets,
@@ -136,4 +137,32 @@ func (s *reminderService) RemindOnce(ctx context.Context) (int, error) {
 	}
 	s.log.InfoContext(ctx, "approval reminders emitted", "stale", len(rows), "emitted", sent)
 	return sent, nil
+}
+
+func validReminderEmail(email string) bool {
+	return email != "" && email != "unknown" && strings.Contains(email, "@")
+}
+
+func formatReminderAmount(amount int64, currency string) string {
+	grouped := groupReminderDigits(amount)
+	switch currency {
+	case "IDR":
+		return "Rp" + grouped
+	case "USD":
+		return "$" + grouped
+	default:
+		return fmt.Sprintf("%s %d", currency, amount)
+	}
+}
+
+func groupReminderDigits(n int64) string {
+	digits := strconv.FormatInt(n, 10)
+	start := 0
+	if strings.HasPrefix(digits, "-") {
+		start = 1
+	}
+	for i := len(digits) - 3; i > start; i -= 3 {
+		digits = digits[:i] + "." + digits[i:]
+	}
+	return digits
 }

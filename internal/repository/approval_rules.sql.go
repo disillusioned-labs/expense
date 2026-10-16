@@ -60,10 +60,12 @@ func (q *Queries) CreateApprovalRule(ctx context.Context, arg CreateApprovalRule
 	return i, err
 }
 
-const createDefaultApprovalRule = `-- name: CreateDefaultApprovalRule :one
+const createDefaultApprovalRule = `-- name: CreateDefaultApprovalRule :exec
 INSERT INTO approval_rules (organization_id, project_id, approver_id, step, created_by)
-VALUES ($1, NULL, $2, 1, $2) RETURNING
-    id, organization_id, project_id, approver_id, step, created_by, created_at, updated_at, deleted_at
+VALUES ($1, NULL, $2, 1, $2)
+ON CONFLICT (organization_id, approver_id)
+    WHERE project_id IS NULL AND deleted_at IS NULL
+    DO NOTHING
 `
 
 type CreateDefaultApprovalRuleParams struct {
@@ -71,21 +73,9 @@ type CreateDefaultApprovalRuleParams struct {
 	ApproverID     uuid.UUID `json:"approver_id"`
 }
 
-func (q *Queries) CreateDefaultApprovalRule(ctx context.Context, arg CreateDefaultApprovalRuleParams) (ApprovalRule, error) {
-	row := q.db.QueryRow(ctx, createDefaultApprovalRule, arg.OrganizationID, arg.ApproverID)
-	var i ApprovalRule
-	err := row.Scan(
-		&i.ID,
-		&i.OrganizationID,
-		&i.ProjectID,
-		&i.ApproverID,
-		&i.Step,
-		&i.CreatedBy,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.DeletedAt,
-	)
-	return i, err
+func (q *Queries) CreateDefaultApprovalRule(ctx context.Context, arg CreateDefaultApprovalRuleParams) error {
+	_, err := q.db.Exec(ctx, createDefaultApprovalRule, arg.OrganizationID, arg.ApproverID)
+	return err
 }
 
 const getApprovalRule = `-- name: GetApprovalRule :one

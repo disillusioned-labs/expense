@@ -40,6 +40,7 @@ type MemberResponse struct {
 	RoleName     string    `json:"role_name"`
 	RoleIsSystem bool      `json:"role_is_system"`
 	CreatedAt    time.Time `json:"created_at"`
+	Version      int64     `json:"version"`
 }
 
 func toMemberResponse(m projectservice.Member) MemberResponse {
@@ -49,6 +50,7 @@ func toMemberResponse(m projectservice.Member) MemberResponse {
 		RoleName:     m.RoleName,
 		RoleIsSystem: m.IsSystem,
 		CreatedAt:    m.CreatedAt,
+		Version:      m.Version,
 	}
 }
 

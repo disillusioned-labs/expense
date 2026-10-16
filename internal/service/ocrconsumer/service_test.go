@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/disillusioned-labs/expense/internal/constant"
+	"github.com/disillusioned-labs/expense/internal/contract"
 	"github.com/disillusioned-labs/expense/internal/repository"
 )
 
@@ -36,7 +37,7 @@ type fakeStore struct {
 	inTx bool
 }
 
-func (f *fakeStore) ExecTx(ctx context.Context, fn func(repository.Querier) error) error {
+func (f *fakeStore) ExecTx(_ context.Context, fn func(repository.Querier) error) error {
 	if f.inTx {
 		return errors.New("nested transaction")
 	}
@@ -45,65 +46,87 @@ func (f *fakeStore) ExecTx(ctx context.Context, fn func(repository.Querier) erro
 	return fn(f.fakeQuerier)
 }
 
-func (f *fakeQuerier) ClaimDocumentForOCR(ctx context.Context, id uuid.UUID) (int64, error) {
+func (f *fakeQuerier) ClaimDocumentForOCR(_ context.Context, _ uuid.UUID) (int64, error) {
+	if f.claimRows > 0 {
+		f.doc.OcrStatus = constant.OCRStatusProcessing
+	}
 	return f.claimRows, nil
 }
 
-func (f *fakeQuerier) GetDocumentForProcessing(ctx context.Context, id uuid.UUID) (repository.GetDocumentForProcessingRow, error) {
+func (f *fakeQuerier) GetDocumentForProcessing(_ context.Context, _ uuid.UUID) (repository.GetDocumentForProcessingRow, error) {
 	return f.doc, nil
 }
 
-func (f *fakeQuerier) CompleteDocumentOCR(ctx context.Context, arg repository.CompleteDocumentOCRParams) (int64, error) {
+func (f *fakeQuerier) CompleteDocumentOCR(_ context.Context, arg repository.CompleteDocumentOCRParams) (int64, error) {
 	f.completeID = arg.ID
 	f.complete = arg
 	return 1, nil
 }
 
-func (f *fakeQuerier) AttachDocumentToTransaction(ctx context.Context, arg repository.AttachDocumentToTransactionParams) (int64, error) {
+func (f *fakeQuerier) AttachDocumentToTransaction(_ context.Context, arg repository.AttachDocumentToTransactionParams) (int64, error) {
 	f.attached = arg
 	return 1, nil
 }
 
-func (f *fakeQuerier) FailDocumentOCR(ctx context.Context, id uuid.UUID) (int64, error) {
+func (f *fakeQuerier) FailDocumentOCR(_ context.Context, id uuid.UUID) (int64, error) {
 	f.failedID = id
 	return 1, nil
 }
 
-func (f *fakeQuerier) CreateTransaction(ctx context.Context, arg repository.CreateTransactionParams) (repository.Transaction, error) {
+func (f *fakeQuerier) CreateTransaction(_ context.Context, arg repository.CreateTransactionParams) (repository.Transaction, error) {
 	f.created = arg
 	return repository.Transaction{ID: uuid.Must(uuid.NewV7())}, nil
 }
 
-func (f *fakeQuerier) LockTransaction(ctx context.Context, id uuid.UUID) (repository.Transaction, error) {
+func (f *fakeQuerier) LockTransaction(_ context.Context, id uuid.UUID) (repository.Transaction, error) {
 	f.locked++
 	return repository.Transaction{
 		ID: id, OrganizationID: f.doc.OrganizationID, Status: constant.StatusDraft,
 	}, nil
 }
 
-func (f *fakeQuerier) GetTransaction(ctx context.Context, arg repository.GetTransactionParams) (repository.Transaction, error) {
+func (f *fakeQuerier) GetTransaction(_ context.Context, arg repository.GetTransactionParams) (repository.Transaction, error) {
 	return repository.Transaction{ID: arg.ID, OrganizationID: arg.OrganizationID, TotalAmount: 12765}, nil
 }
 
-func (f *fakeQuerier) InsertTransactionItems(ctx context.Context, arg repository.InsertTransactionItemsParams) (int64, error) {
+func (f *fakeQuerier) InsertTransactionItems(_ context.Context, arg repository.InsertTransactionItemsParams) (int64, error) {
 	f.inserted = arg
 	return int64(len(arg.Descriptions)), nil
 }
 
-func (f *fakeQuerier) CreateOutboxEvent(ctx context.Context, arg repository.CreateOutboxEventParams) (repository.OutboxEvent, error) {
+func (f *fakeQuerier) CreateOutboxEvent(_ context.Context, arg repository.CreateOutboxEventParams) (repository.OutboxEvent, error) {
 	f.emitted = append(f.emitted, arg)
 	return repository.OutboxEvent{ID: uuid.Must(uuid.NewV7())}, nil
 }
 
+type fakeIdentity struct {
+	contract.IdentityClient
+	lease contract.ExpenseWriteAccessLease
+}
+
+func (f *fakeIdentity) HoldExpenseWriteAccess(ctx context.Context, _, _ uuid.UUID) (contract.ExpenseWriteAccessLease, error) {
+	lease := f.lease
+	if lease.Context == nil {
+		lease.Context, lease.Release = context.WithCancel(ctx)
+	}
+	return lease, nil
+}
+
 func newTestService(q *fakeQuerier) Service {
-	return NewService(&fakeStore{fakeQuerier: q}, slog.New(slog.DiscardHandler))
+	return newTestServiceWithIdentity(q, &fakeIdentity{lease: contract.ExpenseWriteAccessLease{
+		MemberActive: true, ServiceAllowed: true,
+	}})
+}
+
+func newTestServiceWithIdentity(q *fakeQuerier, identity *fakeIdentity) Service {
+	return NewService(&fakeStore{fakeQuerier: q}, identity, slog.New(slog.DiscardHandler))
 }
 
 func pendingDoc(txID *uuid.UUID) repository.GetDocumentForProcessingRow {
 	org := uuid.Must(uuid.NewV7())
 	return repository.GetDocumentForProcessingRow{
 		ID: uuid.Must(uuid.NewV7()), ProjectID: uuid.Must(uuid.NewV7()),
-		TransactionID: txID, OrganizationID: org, OcrStatus: constant.OCRStatusProcessing,
+		TransactionID: txID, OrganizationID: org, OcrStatus: constant.OCRStatusPending,
 		FileName:   "nota.jpg",
 		UploadedBy: org, UploadedByName: "unknown", UploadedByEmail: "unknown", UploadedByRole: "member",
 	}
@@ -145,7 +168,7 @@ func mustJSON(v any) []byte {
 }
 
 func TestHandleDuplicateEventClaimsZeroRowsAndSkips(t *testing.T) {
-	q := &fakeQuerier{claimRows: 0}
+	q := &fakeQuerier{claimRows: 0, doc: pendingDoc(nil)}
 	msg := envelope(receipt(FieldStatusExtracted), nil)
 	if err := newTestService(q).Handle(context.Background(), msg); err != nil {
 		t.Fatalf("Handle: %v", err)

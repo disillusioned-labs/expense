@@ -1,28 +1,36 @@
 -- name: CreateTransaction :one
 INSERT INTO transactions (organization_id, project_id, description, currency,
                           category, created_by, created_by_name, created_by_email, created_by_role)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING
+SELECT sqlc.arg(organization_id), p.id, sqlc.arg(description), sqlc.arg(currency),
+       sqlc.arg(category), sqlc.arg(created_by), sqlc.arg(created_by_name),
+       sqlc.arg(created_by_email), sqlc.arg(created_by_role)
+FROM projects p
+WHERE p.id = sqlc.arg(project_id)
+  AND p.organization_id = sqlc.arg(organization_id)
+  AND p.deleted_at IS NULL
+FOR UPDATE
+RETURNING
     id, organization_id, project_id, status, description, total_amount, currency, category,
     created_by, created_by_name, created_by_email, created_by_role,
-    submitted_at, decided_at, created_at, updated_at, deleted_at;
+    submitted_at, decided_at, created_at, updated_at, deleted_at, version;
 
 -- name: GetTransaction :one
 SELECT id, organization_id, project_id, status, description, total_amount, currency, category,
        created_by, created_by_name, created_by_email, created_by_role,
-       submitted_at, decided_at, created_at, updated_at, deleted_at
+       submitted_at, decided_at, created_at, updated_at, deleted_at, version
 FROM transactions
 WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL;
 
 -- name: LockTransaction :one
 SELECT id, organization_id, project_id, status, description, total_amount, currency, category,
        created_by, created_by_name, created_by_email, created_by_role,
-       submitted_at, decided_at, created_at, updated_at, deleted_at
+       submitted_at, decided_at, created_at, updated_at, deleted_at, version
 FROM transactions
 WHERE id = $1
 FOR UPDATE;
 
 -- name: ListTransactions :many
-SELECT t.id, t.organization_id, t.project_id, t.status, t.description, t.total_amount, t.currency,
+SELECT t.id, t.organization_id, t.project_id, t.status, t.description, t.total_amount, t.currency, t.version,
        t.category, t.created_by, t.created_by_name, t.created_by_email, t.created_by_role,
        t.submitted_at, t.decided_at, t.created_at, t.updated_at,
        p.name AS project_name,
@@ -51,10 +59,11 @@ LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
 -- name: UpdateTransactionDraft :one
 UPDATE transactions
 SET description = $3, currency = $4, category = $5
-WHERE id = $1 AND organization_id = $2 AND status = 'draft' AND deleted_at IS NULL RETURNING
+WHERE id = $1 AND organization_id = $2 AND status = 'draft' AND deleted_at IS NULL
+  AND version = sqlc.arg('expected_version') RETURNING
     id, organization_id, project_id, status, description, total_amount, currency, category,
     created_by, created_by_name, created_by_email, created_by_role,
-    submitted_at, decided_at, created_at, updated_at, deleted_at;
+    submitted_at, decided_at, created_at, updated_at, deleted_at, version;
 
 -- name: SoftDeleteTransaction :execrows
 UPDATE transactions

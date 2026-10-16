@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/disillusioned-labs/expense/internal/authz"
 	"github.com/disillusioned-labs/expense/internal/config"
 	"github.com/disillusioned-labs/expense/internal/handler"
 	approvalhandler "github.com/disillusioned-labs/expense/internal/handler/approval"
@@ -57,6 +58,7 @@ type Deps struct {
 	RedisRequired    bool
 	Cache            cache.Cache
 	Verifier         *authkit.Verifier
+	Authorizer       *authz.Authorizer
 	AuthErrorHandler authkit.HTTPErrorHandler
 
 	RoleHandler        *rolehandler.Handler
@@ -132,6 +134,7 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 		r.Use(func(next http.Handler) http.Handler {
 			return deps.Verifier.Middleware(next, deps.AuthErrorHandler)
 		})
+		r.Use(authorizationMiddleware(deps.Authorizer, log))
 
 		deps.RoleHandler.ProtectedRoutes(r)
 		deps.ProjectHandler.ProtectedRoutes(r)
@@ -164,6 +167,32 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 		http:   httpServer,
 		health: healthHandler,
 	}, nil
+}
+
+func authorizationMiddleware(authorizer *authz.Authorizer, log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			actor, ok := handler.ActorFrom(w, r)
+			if !ok {
+				return
+			}
+			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+				lease, err := authorizer.HoldExpenseWriteAccess(r.Context(), actor)
+				if err != nil {
+					handler.WriteServiceError(w, r, log, err)
+					return
+				}
+				defer lease.Close()
+				next.ServeHTTP(w, r.WithContext(lease.Context))
+				return
+			}
+			if _, err := authorizer.IsServiceAllowed(r.Context(), actor); err != nil {
+				handler.WriteServiceError(w, r, log, err)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // BeginDrain flips /readyz to 503 while continuing to serve traffic, so an

@@ -3,6 +3,8 @@
 package document
 
 import (
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -16,7 +18,11 @@ import (
 )
 
 // maxUploadBytes caps a single nota upload, matching the OCR worker cap.
-const maxUploadBytes = 25 << 20
+const (
+	maxUploadBytes        = 25 << 20
+	maxUploadMemoryBytes  = 1 << 20
+	maxMultipartExtraSize = 1 << 20
+)
 
 var tracer = otel.Tracer("handler/document")
 
@@ -73,11 +79,12 @@ func (h *Handler) uploadToProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	in, ok := h.decodeUpload(w, r)
+	in, cleanupUpload, ok := h.decodeUpload(w, r)
 	if !ok {
 		span.SetStatus(codes.Error, "invalid upload")
 		return
 	}
+	defer cleanupUpload()
 
 	doc, err := h.service.UploadToProject(ctx, actor, projectID, in)
 	if err != nil {
@@ -104,11 +111,12 @@ func (h *Handler) attachToTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	in, ok := h.decodeUpload(w, r)
+	in, cleanupUpload, ok := h.decodeUpload(w, r)
 	if !ok {
 		span.SetStatus(codes.Error, "invalid upload")
 		return
 	}
+	defer cleanupUpload()
 
 	doc, err := h.service.AttachToTransaction(ctx, actor, transactionID, in)
 	if err != nil {
@@ -118,25 +126,77 @@ func (h *Handler) attachToTransaction(w http.ResponseWriter, r *http.Request) {
 	handler.OK(w, http.StatusAccepted, toDocumentResponse(doc))
 }
 
-func (h *Handler) decodeUpload(w http.ResponseWriter, r *http.Request) (documentservice.UploadInput, bool) {
-	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-		handler.WriteError(w, http.StatusBadRequest, handler.CodeBadRequest, "invalid multipart form")
-		return documentservice.UploadInput{}, false
+func (h *Handler) decodeUpload(w http.ResponseWriter, r *http.Request) (documentservice.UploadInput, func(), bool) {
+	cleanupForm := func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes+maxMultipartExtraSize)
+	if err := r.ParseMultipartForm(maxUploadMemoryBytes); err != nil {
+		cleanupForm()
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			handler.WriteError(w, http.StatusRequestEntityTooLarge, handler.CodePayloadTooLarge, "upload exceeds the maximum request size")
+		} else {
+			handler.WriteError(w, http.StatusBadRequest, handler.CodeBadRequest, "invalid multipart form")
+		}
+		return documentservice.UploadInput{}, nil, false
+	}
+	fileCount := 0
+	if r.MultipartForm != nil {
+		for _, files := range r.MultipartForm.File {
+			fileCount += len(files)
+		}
+	}
+	if r.MultipartForm == nil || len(r.MultipartForm.File["file"]) != 1 || fileCount != 1 {
+		cleanupForm()
+		handler.WriteError(w, http.StatusBadRequest, handler.CodeBadRequest, "exactly one file is required")
+		return documentservice.UploadInput{}, nil, false
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		handler.WriteError(w, http.StatusBadRequest, handler.CodeBadRequest, "missing file field")
-		return documentservice.UploadInput{}, false
+		cleanupForm()
+		handler.WriteError(w, http.StatusBadRequest, handler.CodeBadRequest, "invalid file field")
+		return documentservice.UploadInput{}, nil, false
 	}
-	defer func() { _ = file.Close() }()
-
-	mimeType := header.Header.Get("Content-Type")
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
+	cleanup := func() {
+		_ = file.Close()
+		cleanupForm()
+	}
+	if header.Size == 0 {
+		cleanup()
+		handler.WriteError(w, http.StatusUnprocessableEntity, "FILE_EMPTY", "file is empty")
+		return documentservice.UploadInput{}, nil, false
+	}
+	if header.Size > maxUploadBytes {
+		cleanup()
+		handler.WriteError(w, http.StatusRequestEntityTooLarge, handler.CodePayloadTooLarge, "file exceeds the 25 MiB limit")
+		return documentservice.UploadInput{}, nil, false
+	}
+	prefix := make([]byte, 512)
+	n, err := io.ReadFull(file, prefix)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		cleanup()
+		handler.WriteError(w, http.StatusInternalServerError, handler.CodeInternal, "could not read uploaded file")
+		return documentservice.UploadInput{}, nil, false
+	}
+	mimeType := http.DetectContentType(prefix[:n])
+	switch mimeType {
+	case "image/jpeg", "image/png", "image/webp", "application/pdf":
+	default:
+		cleanup()
+		handler.WriteError(w, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "choose a JPEG, PNG, WebP, or PDF file")
+		return documentservice.UploadInput{}, nil, false
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		handler.WriteError(w, http.StatusInternalServerError, handler.CodeInternal, "could not read uploaded file")
+		return documentservice.UploadInput{}, nil, false
 	}
 	return documentservice.UploadInput{
 		FileName: header.Filename, MimeType: mimeType, Size: header.Size, Content: file,
-	}, true
+	}, cleanup, true
 }
 
 func (h *Handler) listByProject(w http.ResponseWriter, r *http.Request) {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const archiveProject = `-- name: ArchiveProject :one
@@ -124,7 +125,7 @@ func (q *Queries) GetProject(ctx context.Context, arg GetProjectParams) (Project
 }
 
 const getProjectMember = `-- name: GetProjectMember :one
-SELECT organization_id, project_id, user_id, role_id, created_at, updated_at
+SELECT organization_id, project_id, user_id, role_id, created_at, updated_at, version
 FROM project_members
 WHERE project_id = $1 AND user_id = $2
 `
@@ -144,6 +145,7 @@ func (q *Queries) GetProjectMember(ctx context.Context, arg GetProjectMemberPara
 		&i.RoleID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Version,
 	)
 	return i, err
 }
@@ -203,7 +205,7 @@ func (q *Queries) ListPlacedProjects(ctx context.Context, arg ListPlacedProjects
 
 const listProjectMembers = `-- name: ListProjectMembers :many
 SELECT pm.organization_id, pm.project_id, pm.user_id, pm.role_id, pm.created_at, pm.updated_at,
-       r.name AS role_name, r.is_system AS role_is_system
+       pm.version, r.name AS role_name, r.is_system AS role_is_system
 FROM project_members pm
          JOIN roles r ON r.id = pm.role_id AND r.deleted_at IS NULL
 WHERE pm.project_id = $1
@@ -217,6 +219,7 @@ type ListProjectMembersRow struct {
 	RoleID         uuid.UUID `json:"role_id"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	Version        int64     `json:"version"`
 	RoleName       string    `json:"role_name"`
 	RoleIsSystem   bool      `json:"role_is_system"`
 }
@@ -237,6 +240,7 @@ func (q *Queries) ListProjectMembers(ctx context.Context, projectID uuid.UUID) (
 			&i.RoleID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Version,
 			&i.RoleName,
 			&i.RoleIsSystem,
 		); err != nil {
@@ -299,6 +303,34 @@ func (q *Queries) ListProjects(ctx context.Context, arg ListProjectsParams) ([]P
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockProjectForDelete = `-- name: LockProjectForDelete :one
+SELECT id, organization_id, name, created_by, created_at, updated_at, deleted_at, archived_at
+FROM projects
+WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL
+FOR UPDATE
+`
+
+type LockProjectForDeleteParams struct {
+	ID             uuid.UUID `json:"id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
+}
+
+func (q *Queries) LockProjectForDelete(ctx context.Context, arg LockProjectForDeleteParams) (Project, error) {
+	row := q.db.QueryRow(ctx, lockProjectForDelete, arg.ID, arg.OrganizationID)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.Name,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.ArchivedAt,
+	)
+	return i, err
 }
 
 const softDeleteProject = `-- name: SoftDeleteProject :execrows
@@ -381,15 +413,17 @@ const upsertProjectMember = `-- name: UpsertProjectMember :one
 INSERT INTO project_members (organization_id, project_id, user_id, role_id)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (project_id, user_id)
-    DO UPDATE SET role_id = EXCLUDED.role_id RETURNING
-        organization_id, project_id, user_id, role_id, created_at, updated_at
+    DO UPDATE SET role_id = EXCLUDED.role_id, version = project_members.version + 1
+    WHERE project_members.version = $5::bigint
+RETURNING organization_id, project_id, user_id, role_id, created_at, updated_at, version
 `
 
 type UpsertProjectMemberParams struct {
-	OrganizationID uuid.UUID `json:"organization_id"`
-	ProjectID      uuid.UUID `json:"project_id"`
-	UserID         uuid.UUID `json:"user_id"`
-	RoleID         uuid.UUID `json:"role_id"`
+	OrganizationID  uuid.UUID   `json:"organization_id"`
+	ProjectID       uuid.UUID   `json:"project_id"`
+	UserID          uuid.UUID   `json:"user_id"`
+	RoleID          uuid.UUID   `json:"role_id"`
+	ExpectedVersion pgtype.Int8 `json:"expected_version"`
 }
 
 func (q *Queries) UpsertProjectMember(ctx context.Context, arg UpsertProjectMemberParams) (ProjectMember, error) {
@@ -398,6 +432,7 @@ func (q *Queries) UpsertProjectMember(ctx context.Context, arg UpsertProjectMemb
 		arg.ProjectID,
 		arg.UserID,
 		arg.RoleID,
+		arg.ExpectedVersion,
 	)
 	var i ProjectMember
 	err := row.Scan(
@@ -407,6 +442,7 @@ func (q *Queries) UpsertProjectMember(ctx context.Context, arg UpsertProjectMemb
 		&i.RoleID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Version,
 	)
 	return i, err
 }

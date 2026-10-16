@@ -105,6 +105,7 @@ type ProjectMember struct {
 	RoleID         uuid.UUID `json:"role_id"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	Version        int64     `json:"version"`
 }
 
 type Role struct {
@@ -141,6 +142,7 @@ type Transaction struct {
 	CreatedAt      time.Time          `json:"created_at"`
 	UpdatedAt      time.Time          `json:"updated_at"`
 	DeletedAt      pgtype.Timestamptz `json:"deleted_at"`
+	Version        int64              `json:"version"`
 }
 
 type TransactionItem struct {

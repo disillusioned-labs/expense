@@ -155,10 +155,7 @@ func RunAPI(cfg *config.Config) error {
 	}
 	defer closeOcr()
 
-	deps, err := buildDeps(ctx, pool, rdb, redisRequired, svcCache, s3Client, identityClient, ocrSubmitter, cfg, log)
-	if err != nil {
-		return fmt.Errorf("build dependencies: %w", err)
-	}
+	deps := buildDeps(ctx, pool, rdb, redisRequired, svcCache, s3Client, identityClient, ocrSubmitter, cfg, log)
 	srv, err := server.New(cfg, log, deps)
 	if err != nil {
 		return err

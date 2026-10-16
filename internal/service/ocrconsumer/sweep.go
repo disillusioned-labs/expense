@@ -8,11 +8,13 @@ package ocrconsumer
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/disillusioned-labs/expense/internal/contract"
 	"github.com/disillusioned-labs/expense/internal/ocr"
 	"github.com/disillusioned-labs/expense/internal/repository"
 )
@@ -28,9 +30,9 @@ type Sweeper struct {
 
 // NewSweeper builds the sweep; statuses is the gateway-backed StatusReader
 // and the embedded Service applies terminal answers through its Handle path.
-func NewSweeper(repo repository.Store, statuses ocr.StatusReader, log *slog.Logger) *Sweeper {
+func NewSweeper(repo repository.Store, statuses ocr.StatusReader, identity contract.IdentityClient, log *slog.Logger) *Sweeper {
 	return &Sweeper{
-		Service:  NewService(repo, log),
+		Service:  NewService(repo, identity, log),
 		repo:     repo,
 		statuses: statuses,
 		log:      log,
@@ -68,6 +70,9 @@ func (s *Sweeper) SweepStale(ctx context.Context, olderThan time.Duration, limit
 		}
 
 		if err := s.Handle(ctx, messageFromSnapshot(doc.ID, snap)); err != nil {
+			if errors.Is(err, ErrWriteAccessDenied) {
+				continue
+			}
 			s.log.ErrorContext(ctx, "sweep apply failed",
 				"error", err, "document_id", doc.ID, "status", snap.Status)
 			continue

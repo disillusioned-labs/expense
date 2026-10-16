@@ -106,7 +106,7 @@ func RunGRPC(cfg *config.Config) error {
 	// -------------------------------------------------------------------------
 	// gRPC server
 	// -------------------------------------------------------------------------
-	grpcSrv, err := server.NewGRPC(cfg, log, approvalSvc)
+	grpcSrv, err := server.NewGRPC(cfg, log, approvalSvc, authorizer)
 	if err != nil {
 		return fmt.Errorf("create grpc server: %w", err)
 	}

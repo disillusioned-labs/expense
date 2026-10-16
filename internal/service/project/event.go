@@ -5,6 +5,7 @@ import "github.com/google/uuid"
 const (
 	EventProjectCreated       = "project.created"
 	EventProjectUpdated       = "project.updated"
+	EventProjectDeleted       = "project.deleted"
 	EventProjectMemberPlaced  = "project_member.placed"
 	EventProjectMemberRemoved = "project_member.removed"
 	EventProjectArchived      = "project.archived"
@@ -18,6 +19,12 @@ type ProjectCreatedEvent struct {
 }
 
 type ProjectUpdatedEvent struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	ProjectID      uuid.UUID `json:"project_id"`
+	ActorID        uuid.UUID `json:"actor_id"`
+}
+
+type ProjectDeletedEvent struct {
 	OrganizationID uuid.UUID `json:"organization_id"`
 	ProjectID      uuid.UUID `json:"project_id"`
 	ActorID        uuid.UUID `json:"actor_id"`

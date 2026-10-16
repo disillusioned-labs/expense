@@ -36,7 +36,7 @@ func NewAuthorizer(repo repository.Store, identity contract.IdentityClient, log 
 func (a *Authorizer) isAdmin(ctx context.Context, actor Actor) (bool, error) {
 	role, err := a.identity.GetMemberRole(ctx, actor.OrgID, actor.UserID)
 	if err != nil {
-		return false, err
+		return false, service.ErrIdentityUnavailable
 	}
 	return role == RoleOwner || role == RoleAdmin, nil
 }
@@ -44,7 +44,7 @@ func (a *Authorizer) isAdmin(ctx context.Context, actor Actor) (bool, error) {
 func (a *Authorizer) CheckOrgWrite(ctx context.Context, actor Actor) error {
 	isFrozen, isDeleted, err := a.identity.GetOrgStatus(ctx, actor.OrgID)
 	if err != nil {
-		return err
+		return service.ErrIdentityUnavailable
 	}
 	if isDeleted {
 		return service.ErrOrgDeleted
@@ -107,17 +107,59 @@ func (a *Authorizer) IsPlacedInProject(ctx context.Context, actor Actor, project
 
 func (a *Authorizer) IsMemberActive(ctx context.Context, actor Actor, userID uuid.UUID) (bool, error) {
 	active, _, err := a.identity.IsMemberActive(ctx, actor.OrgID, userID)
-	return active, err
+	if err != nil {
+		return false, service.ErrIdentityUnavailable
+	}
+	return active, nil
+}
+
+func (a *Authorizer) IsMemberActiveStrict(ctx context.Context, actor Actor, userID uuid.UUID) (bool, error) {
+	checker, ok := a.identity.(contract.StrictMembershipChecker)
+	if !ok {
+		return false, service.ErrIdentityUnavailable
+	}
+	active, _, err := checker.IsMemberActiveStrict(ctx, actor.OrgID, userID)
+	if err != nil {
+		return false, service.ErrIdentityUnavailable
+	}
+	return active, nil
 }
 
 // IsServiceAllowed checks whether the actor has access to the expense service.
 func (a *Authorizer) IsServiceAllowed(ctx context.Context, actor Actor) (bool, error) {
 	allowed, err := a.identity.IsServiceAccessAllowed(ctx, actor.UserID, actor.OrgID, "expense")
 	if err != nil {
-		return false, err
+		return false, service.ErrIdentityUnavailable
 	}
 	if !allowed {
 		return false, service.ErrServiceNotAllowed
 	}
 	return true, nil
+}
+
+// HoldExpenseWriteAccess checks permission under an Identity lock that remains
+// held until the caller finishes its Expense write.
+func (a *Authorizer) HoldExpenseWriteAccess(ctx context.Context, actor Actor) (contract.ExpenseWriteAccessLease, error) {
+	lease, err := a.identity.HoldExpenseWriteAccess(ctx, actor.OrgID, actor.UserID)
+	if err != nil || lease.Context == nil || lease.Release == nil {
+		lease.Close()
+		return contract.ExpenseWriteAccessLease{}, service.ErrIdentityUnavailable
+	}
+	if lease.IsDeleted {
+		lease.Close()
+		return contract.ExpenseWriteAccessLease{}, service.ErrOrgDeleted
+	}
+	if lease.IsFrozen {
+		lease.Close()
+		return contract.ExpenseWriteAccessLease{}, service.ErrOrgFrozen
+	}
+	if !lease.MemberActive {
+		lease.Close()
+		return contract.ExpenseWriteAccessLease{}, service.ErrForbidden
+	}
+	if !lease.ServiceAllowed {
+		lease.Close()
+		return contract.ExpenseWriteAccessLease{}, service.ErrServiceNotAllowed
+	}
+	return lease, nil
 }
