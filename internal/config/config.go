@@ -17,12 +17,14 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 
 	platformconfig "github.com/disillusioned-labs/platform/config"
+	platformgrpc "github.com/disillusioned-labs/platform/grpc"
 )
 
 // Config is the root of all application settings, one field per subsystem.
@@ -42,9 +44,10 @@ type Config struct {
 	GRPCClient platformconfig.GRPCClientConfig `mapstructure:"grpc_client"`
 	Identity   IdentityClientConfig            `mapstructure:"identity"`
 	// GRPC is the internal gRPC server surface (decision D2, ExpenseService).
-	GRPC   platformconfig.GRPCConfig `mapstructure:"grpc"`
-	Remind ReminderConfig            `mapstructure:"reminder"`
-	Ocr    OcrConfig                 `mapstructure:"ocr"`
+	GRPC     platformconfig.GRPCConfig `mapstructure:"grpc"`
+	GRPCAuth GRPCAuthConfig            `mapstructure:"grpc_auth"`
+	Remind   ReminderConfig            `mapstructure:"reminder"`
+	Ocr      OcrConfig                 `mapstructure:"ocr"`
 }
 
 // IdentityClientConfig names where identity's gRPC surface lives. Targets are
@@ -53,7 +56,31 @@ type Config struct {
 type IdentityClientConfig struct {
 	// GRPCTarget is identity's gRPC address (identity.v1). Must not be empty:
 	// authz checks on every request dial identity.
-	GRPCTarget string `mapstructure:"grpc_target"`
+	GRPCTarget       string `mapstructure:"grpc_target"`
+	GRPCServiceToken string `mapstructure:"grpc_service_token"`
+}
+
+// GRPCAuthConfig contains tokens accepted from inbound service callers.
+type GRPCAuthConfig struct {
+	IdentityServiceTokens string `mapstructure:"identity_service_tokens"`
+}
+
+func (c GRPCAuthConfig) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("identity_service_tokens", redactServiceTokens(c.IdentityServiceTokens)))
+}
+
+func (c IdentityClientConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("grpc_target", c.GRPCTarget),
+		slog.String("grpc_service_token", redactServiceTokens(c.GRPCServiceToken)),
+	)
+}
+
+func redactServiceTokens(value string) string {
+	if value == "" {
+		return ""
+	}
+	return "xxxxx"
 }
 
 // OcrConfig selects how documents reach the OCR pipeline. An empty
@@ -315,6 +342,22 @@ func (c *Config) validate() error {
 	if err := platformconfig.ValidateGRPCClient(&c.GRPCClient); err != nil {
 		errs = append(errs, err)
 	}
+	if err := platformconfig.ValidateGRPCTransportSecurity(c.Service.Env, &c.GRPC.TLS, &c.GRPCClient.TLS); err != nil {
+		errs = append(errs, err)
+	}
+	identityTokens, err := platformgrpc.ParseServiceTokens(c.GRPCAuth.IdentityServiceTokens)
+	if err != nil {
+		fail("grpc_auth.identity_service_tokens: %v", err)
+	} else if c.Service.Env != platformconfig.EnvDevelopment && len(identityTokens) == 0 {
+		fail("grpc_auth.identity_service_tokens must contain at least one 32-byte service token outside development")
+	}
+	if c.Identity.GRPCServiceToken != "" {
+		if err := platformgrpc.ValidateServiceToken(c.Identity.GRPCServiceToken); err != nil {
+			fail("identity.grpc_service_token: %v", err)
+		}
+	} else if c.Service.Env != platformconfig.EnvDevelopment {
+		fail("identity.grpc_service_token must be set outside development")
+	}
 	if strings.TrimSpace(c.Identity.GRPCTarget) == "" {
 		fail("identity.grpc_target must not be empty")
 	}
@@ -427,6 +470,8 @@ func setDefaults(v *viper.Viper) {
 
 	// gRPC client (expense → identity).
 	v.SetDefault("identity.grpc_target", "localhost:9090")
+	v.SetDefault("identity.grpc_service_token", "")
+	v.SetDefault("grpc_auth.identity_service_tokens", "")
 	v.SetDefault("grpc_client.timeout", "50ms")
 	v.SetDefault("grpc_client.max_recv_msg_size", 4194304)
 	v.SetDefault("grpc_client.max_send_msg_size", 4194304)

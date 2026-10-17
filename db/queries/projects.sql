@@ -8,6 +8,12 @@ SELECT id, organization_id, name, created_by, created_at, updated_at, deleted_at
 FROM projects
 WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL;
 
+-- name: LockProjectForDocumentUpload :one
+SELECT id, organization_id, name, created_by, created_at, updated_at, deleted_at, archived_at
+FROM projects
+WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL
+FOR UPDATE;
+
 -- name: ListProjects :many
 SELECT id, organization_id, name, created_by, created_at, updated_at, deleted_at, archived_at
 FROM projects
@@ -25,6 +31,9 @@ WHERE id = $1 AND organization_id = $3 AND deleted_at IS NULL RETURNING
 
 -- name: CountProjectTransactions :one
 SELECT COUNT(*) FROM transactions WHERE project_id = $1 AND deleted_at IS NULL;
+
+-- name: CountProjectDocuments :one
+SELECT COUNT(*) FROM documents WHERE project_id = $1;
 
 -- name: LockProjectForDelete :one
 SELECT id, organization_id, name, created_by, created_at, updated_at, deleted_at, archived_at
@@ -64,6 +73,11 @@ WHERE project_id = $1 AND user_id = $2;
 
 -- name: DeleteProjectMember :execrows
 DELETE FROM project_members WHERE project_id = $1 AND user_id = $2;
+
+-- name: DeleteProjectMembersForOrganizationUser :many
+DELETE FROM project_members
+WHERE organization_id = $1 AND user_id = $2
+RETURNING project_id;
 
 -- name: ListProjectMembers :many
 SELECT pm.organization_id, pm.project_id, pm.user_id, pm.role_id, pm.created_at, pm.updated_at,

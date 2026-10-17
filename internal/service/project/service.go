@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
 	"github.com/disillusioned-labs/expense/internal/authz"
@@ -18,6 +19,8 @@ import (
 )
 
 var tracer = otel.Tracer("service/project")
+
+var errProjectHasDocuments = service.NewError("PROJECT_HAS_DOCUMENTS", 409, "project has uploaded receipts")
 
 type ProjectService interface {
 	Create(ctx context.Context, actor authz.Actor, in CreateInput) (Project, error)
@@ -30,6 +33,8 @@ type ProjectService interface {
 
 	PlaceMember(ctx context.Context, actor authz.Actor, projectID uuid.UUID, in PlaceMemberInput) (Member, error)
 	RemoveMember(ctx context.Context, actor authz.Actor, projectID, userID uuid.UUID) error
+	// ClearOrganizationMemberPlacements removes placements left by a prior membership.
+	ClearOrganizationMemberPlacements(ctx context.Context, actor authz.Actor, userID uuid.UUID) (int64, error)
 	ListMembers(ctx context.Context, actor authz.Actor, projectID uuid.UUID) ([]Member, error)
 }
 
@@ -116,6 +121,25 @@ func (s *projectService) Create(ctx context.Context, actor authz.Actor, in Creat
 func (s *projectService) Get(ctx context.Context, actor authz.Actor, id uuid.UUID) (Project, error) {
 	ctx, span := tracer.Start(ctx, "ProjectService.Get")
 	defer span.End()
+
+	admin, err := s.isAdmin(ctx, actor)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "check admin failed")
+		return Project{}, err
+	}
+	if !admin {
+		placed, err := s.authz.IsPlacedInProject(ctx, actor, id)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "check project placement failed")
+			return Project{}, err
+		}
+		if !placed {
+			span.SetStatus(codes.Error, "project access denied")
+			return Project{}, service.ErrForbidden
+		}
+	}
 
 	p, err := s.get(ctx, actor, id)
 	if err != nil {
@@ -254,6 +278,13 @@ func (s *projectService) Delete(ctx context.Context, actor authz.Actor, id uuid.
 		if count > 0 {
 			return service.ErrProjectHasTransactions
 		}
+		documentCount, err := q.CountProjectDocuments(ctx, id)
+		if err != nil {
+			return err
+		}
+		if documentCount > 0 {
+			return errProjectHasDocuments
+		}
 		rows, err := q.SoftDeleteProject(ctx, repository.SoftDeleteProjectParams{ID: id, OrganizationID: actor.OrgID})
 		if err != nil {
 			return err
@@ -268,7 +299,7 @@ func (s *projectService) Delete(ctx context.Context, actor authz.Actor, id uuid.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return service.ErrNotFound
 	}
-	if err != nil && !errors.Is(err, service.ErrProjectHasTransactions) && !errors.Is(err, service.ErrNotFound) {
+	if err != nil && !errors.Is(err, service.ErrProjectHasTransactions) && !errors.Is(err, errProjectHasDocuments) && !errors.Is(err, service.ErrNotFound) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "delete project failed")
 		s.log.ErrorContext(ctx, "delete project failed", "error", err)
@@ -454,6 +485,44 @@ func (s *projectService) RemoveMember(ctx context.Context, actor authz.Actor, pr
 		s.log.ErrorContext(ctx, "delete project member failed", "error", err)
 	}
 	return err
+}
+
+func (s *projectService) ClearOrganizationMemberPlacements(ctx context.Context, actor authz.Actor, userID uuid.UUID) (int64, error) {
+	ctx, span := tracer.Start(ctx, "ProjectService.ClearOrganizationMemberPlacements")
+	defer span.End()
+
+	var projectIDs []uuid.UUID
+	err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+		var err error
+		projectIDs, err = q.DeleteProjectMembersForOrganizationUser(ctx, repository.DeleteProjectMembersForOrganizationUserParams{
+			OrganizationID: actor.OrgID,
+			UserID:         userID,
+		})
+		if err != nil {
+			return err
+		}
+		for _, projectID := range projectIDs {
+			// Accepting the invitation triggers this cleanup, even though an admin authorizes the RPC.
+			if err := service.Emit(ctx, q, "project_member", projectID, EventProjectMemberRemoved, constant.TopicAudit, ProjectMemberRemovedEvent{
+				OrganizationID: actor.OrgID,
+				ProjectID:      projectID,
+				UserID:         userID,
+				ActorID:        userID,
+				Reason:         "organization_membership_reactivated",
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "clear organization member placements failed")
+		s.log.ErrorContext(ctx, "clear organization member placements failed", "error", err)
+		return 0, err
+	}
+	span.SetAttributes(attribute.Int("project_placements.removed", len(projectIDs)))
+	return int64(len(projectIDs)), nil
 }
 
 func (s *projectService) ListMembers(ctx context.Context, actor authz.Actor, projectID uuid.UUID) ([]Member, error) {

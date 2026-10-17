@@ -43,6 +43,7 @@ type ProjectMemberRemovedEvent struct {
 	ProjectID      uuid.UUID `json:"project_id"`
 	UserID         uuid.UUID `json:"user_id"`
 	ActorID        uuid.UUID `json:"actor_id"`
+	Reason         string    `json:"reason,omitempty"`
 }
 
 type ProjectArchivedEvent struct {

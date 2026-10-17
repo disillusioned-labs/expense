@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -33,6 +34,15 @@ type Handler struct {
 
 func NewDocumentHandler(service documentservice.DocumentService, log *slog.Logger) *Handler {
 	return &Handler{service: service, log: log}
+}
+
+func uploadIdempotencyKey(r *http.Request) (uuid.UUID, bool) {
+	values := r.Header.Values("Idempotency-Key")
+	if len(values) != 1 {
+		return uuid.Nil, false
+	}
+	key, err := uuid.Parse(strings.TrimSpace(values[0]))
+	return key, err == nil && key != uuid.Nil
 }
 
 func (h *Handler) documentID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -78,6 +88,12 @@ func (h *Handler) uploadToProject(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "invalid project id")
 		return
 	}
+	idempotencyKey, ok := uploadIdempotencyKey(r)
+	if !ok {
+		handler.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "a non-empty UUID Idempotency-Key header is required")
+		span.SetStatus(codes.Error, "invalid idempotency key")
+		return
+	}
 
 	in, cleanupUpload, ok := h.decodeUpload(w, r)
 	if !ok {
@@ -85,6 +101,7 @@ func (h *Handler) uploadToProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanupUpload()
+	in.IdempotencyKey = idempotencyKey
 
 	doc, err := h.service.UploadToProject(ctx, actor, projectID, in)
 	if err != nil {
@@ -110,6 +127,12 @@ func (h *Handler) attachToTransaction(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "invalid transaction id")
 		return
 	}
+	idempotencyKey, ok := uploadIdempotencyKey(r)
+	if !ok {
+		handler.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "a non-empty UUID Idempotency-Key header is required")
+		span.SetStatus(codes.Error, "invalid idempotency key")
+		return
+	}
 
 	in, cleanupUpload, ok := h.decodeUpload(w, r)
 	if !ok {
@@ -117,6 +140,7 @@ func (h *Handler) attachToTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanupUpload()
+	in.IdempotencyKey = idempotencyKey
 
 	doc, err := h.service.AttachToTransaction(ctx, actor, transactionID, in)
 	if err != nil {

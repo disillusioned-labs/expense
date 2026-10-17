@@ -252,6 +252,16 @@ func (s *ocrConsumerService) attach(ctx context.Context, doc repository.GetDocum
 			})
 			return err
 		}
+		const maxInt64 = int64(1<<63 - 1)
+		if locked.TotalAmount < 0 || item.Amount > maxInt64-locked.TotalAmount {
+			if _, err := q.CompleteDocumentOCR(ctx, repository.CompleteDocumentOCRParams{
+				ID: doc.ID, OcrStatus: constant.OCRStatusNeedsReview, OcrData: data,
+			}); err != nil {
+				return err
+			}
+			status = StatusNeedsReview
+			return nil
+		}
 		if err := insertItems(ctx, q, transactionID, []OCRItem{*item}); err != nil {
 			return err
 		}
@@ -314,6 +324,7 @@ func (s *ocrConsumerService) createDraft(ctx context.Context, doc repository.Get
 
 	var created repository.Transaction
 	processed := false
+	parked := false
 	if err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
 		current, err := q.GetDocumentForProcessing(ctx, doc.ID)
 		if err != nil {
@@ -339,6 +350,16 @@ func (s *ocrConsumerService) createDraft(ctx context.Context, doc repository.Get
 			CreatedByEmail: doc.UploadedByEmail,
 			CreatedByRole:  doc.UploadedByRole,
 		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			rows, completeErr := q.CompleteDocumentOCR(ctx, repository.CompleteDocumentOCRParams{
+				ID: doc.ID, OcrStatus: constant.OCRStatusNeedsReview, OcrData: data,
+			})
+			if completeErr != nil {
+				return completeErr
+			}
+			parked = rows > 0
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -369,6 +390,10 @@ func (s *ocrConsumerService) createDraft(ctx context.Context, doc repository.Get
 		return err
 	}
 	if !processed {
+		return nil
+	}
+	if parked {
+		s.log.InfoContext(ctx, "OCR result parked because project no longer accepts drafts", "document_id", doc.ID)
 		return nil
 	}
 	s.log.InfoContext(ctx, "draft transaction created from ocr",

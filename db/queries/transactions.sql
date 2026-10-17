@@ -8,6 +8,7 @@ FROM projects p
 WHERE p.id = sqlc.arg(project_id)
   AND p.organization_id = sqlc.arg(organization_id)
   AND p.deleted_at IS NULL
+  AND p.archived_at IS NULL
 FOR UPDATE
 RETURNING
     id, organization_id, project_id, status, description, total_amount, currency, category,
@@ -34,7 +35,7 @@ SELECT t.id, t.organization_id, t.project_id, t.status, t.description, t.total_a
        t.category, t.created_by, t.created_by_name, t.created_by_email, t.created_by_role,
        t.submitted_at, t.decided_at, t.created_at, t.updated_at,
        p.name AS project_name,
-       (SELECT COUNT(*) FROM documents d WHERE d.transaction_id = t.id AND d.deleted_at IS NULL) AS document_count,
+       (SELECT COUNT(*) FROM documents d WHERE d.transaction_id = t.id AND d.deleted_at IS NULL AND d.upload_complete) AS document_count,
        (SELECT COUNT(*) FROM approvals a WHERE a.transaction_id = t.id)                          AS total_steps,
        (SELECT MIN(a.step) FROM approvals a
         WHERE a.transaction_id = t.id AND a.activated_at IS NOT NULL AND a.cancelled_at IS NULL
@@ -53,7 +54,7 @@ WHERE t.organization_id = $1 AND t.deleted_at IS NULL
   AND (sqlc.narg('category')::text IS NULL OR t.category = sqlc.narg('category'))
   AND (sqlc.narg('date_from')::timestamptz IS NULL OR t.created_at >= sqlc.narg('date_from'))
   AND (sqlc.narg('date_to')::timestamptz IS NULL OR t.created_at <= sqlc.narg('date_to'))
-ORDER BY t.created_at DESC
+ORDER BY t.created_at DESC, t.id DESC
 LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
 
 -- name: UpdateTransactionDraft :one
@@ -86,5 +87,5 @@ SET status = 'rejected', decided_at = now()
 WHERE id = $1 AND status = 'pending_approval';
 
 -- name: CountTransactionDocuments :one
-SELECT COUNT(*) FROM documents WHERE transaction_id = $1 AND deleted_at IS NULL;
+SELECT COUNT(*) FROM documents WHERE transaction_id = $1 AND deleted_at IS NULL AND upload_complete;
 

@@ -24,8 +24,14 @@ type Querier interface {
 	// second draft transaction.
 	ClaimDocumentForOCR(ctx context.Context, id uuid.UUID) (int64, error)
 	ClaimPendingOutboxEvents(ctx context.Context, arg ClaimPendingOutboxEventsParams) ([]OutboxEvent, error)
+	// Claim a bounded batch before calling the gateway. The timestamp provides
+	// retry backoff and prevents one permanently failing row from starving later
+	// documents when multiple worker instances run.
+	ClaimStaleOCRSubmissions(ctx context.Context, arg ClaimStaleOCRSubmissionsParams) ([]ClaimStaleOCRSubmissionsRow, error)
 	CompleteDocumentOCR(ctx context.Context, arg CompleteDocumentOCRParams) (int64, error)
+	CompleteDocumentUpload(ctx context.Context, id uuid.UUID) (int64, error)
 	CountDefaultOrgRules(ctx context.Context, organizationID uuid.UUID) (int64, error)
+	CountProjectDocuments(ctx context.Context, projectID uuid.UUID) (int64, error)
 	CountProjectTransactions(ctx context.Context, projectID uuid.UUID) (int64, error)
 	CountRoleUsage(ctx context.Context, roleID uuid.UUID) (int64, error)
 	CountTransactionDocuments(ctx context.Context, transactionID *uuid.UUID) (int64, error)
@@ -39,6 +45,7 @@ type Querier interface {
 	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error)
 	DeleteProjectMember(ctx context.Context, arg DeleteProjectMemberParams) (int64, error)
+	DeleteProjectMembersForOrganizationUser(ctx context.Context, arg DeleteProjectMembersForOrganizationUserParams) ([]uuid.UUID, error)
 	DeletePublishedOutboxEvents(ctx context.Context) (int64, error)
 	DeleteRolePermissions(ctx context.Context, roleID uuid.UUID) error
 	DeleteTransactionItems(ctx context.Context, transactionID uuid.UUID) (int64, error)
@@ -50,6 +57,7 @@ type Querier interface {
 	// OCR creation locks document then inserts a transaction; delete locks a known
 	// transaction first, then the document, and locks a newly linked draft second.
 	GetDocumentForProcessing(ctx context.Context, id uuid.UUID) (GetDocumentForProcessingRow, error)
+	GetDocumentUploadByKey(ctx context.Context, arg GetDocumentUploadByKeyParams) (GetDocumentUploadByKeyRow, error)
 	GetOldestPendingOutboxAgeSeconds(ctx context.Context) (int64, error)
 	GetProject(ctx context.Context, arg GetProjectParams) (Project, error)
 	GetProjectMember(ctx context.Context, arg GetProjectMemberParams) (ProjectMember, error)
@@ -79,18 +87,22 @@ type Querier interface {
 	// all organizations - the reminder worker's feed.
 	ListStaleActiveApprovals(ctx context.Context, arg ListStaleActiveApprovalsParams) ([]ListStaleActiveApprovalsRow, error)
 	// Documents still waiting on OCR past the sweep threshold that have a job id
-	// to ask about. Rows without ocr_document_id predate submit-response storage
-	// and can only be resolved by the routed event.
+	// to ask about; documents without a job ID are handled by ClaimStaleOCRSubmissions.
 	ListStaleOCRDocuments(ctx context.Context, arg ListStaleOCRDocumentsParams) ([]ListStaleOCRDocumentsRow, error)
 	ListTransactionItems(ctx context.Context, transactionID uuid.UUID) ([]TransactionItem, error)
 	ListTransactions(ctx context.Context, arg ListTransactionsParams) ([]ListTransactionsRow, error)
+	// Upload completion locks before emitting the audit event. Retries may write
+	// the same bytes to the reserved object key, but only one completes the row.
+	LockDocumentUpload(ctx context.Context, id uuid.UUID) (LockDocumentUploadRow, error)
 	LockProjectForDelete(ctx context.Context, arg LockProjectForDeleteParams) (Project, error)
+	LockProjectForDocumentUpload(ctx context.Context, arg LockProjectForDocumentUploadParams) (Project, error)
 	LockTransaction(ctx context.Context, id uuid.UUID) (Transaction, error)
 	MarkOutboxEventFailed(ctx context.Context, arg MarkOutboxEventFailedParams) error
 	MarkOutboxEventPublished(ctx context.Context, id uuid.UUID) error
 	ReassignApprovalRules(ctx context.Context, arg ReassignApprovalRulesParams) (int64, error)
 	RejectTransaction(ctx context.Context, id uuid.UUID) (int64, error)
 	ReleaseOutboxEventLock(ctx context.Context, id uuid.UUID) error
+	ReserveDocumentUpload(ctx context.Context, arg ReserveDocumentUploadParams) (uuid.UUID, error)
 	ResolveDefaultRules(ctx context.Context, organizationID uuid.UUID) ([]ApprovalRule, error)
 	ResolveProjectRules(ctx context.Context, arg ResolveProjectRulesParams) ([]ApprovalRule, error)
 	// Stores the ocr job id returned at submit time, so the reconciliation sweep

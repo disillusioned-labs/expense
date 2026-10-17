@@ -16,7 +16,7 @@ import (
 const attachDocumentToTransaction = `-- name: AttachDocumentToTransaction :execrows
 UPDATE documents
 SET transaction_id = $2, ocr_status = $3, ocr_data = $4, ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL AND upload_complete
 `
 
 type AttachDocumentToTransactionParams struct {
@@ -42,7 +42,7 @@ func (q *Queries) AttachDocumentToTransaction(ctx context.Context, arg AttachDoc
 const claimDocumentForOCR = `-- name: ClaimDocumentForOCR :execrows
 UPDATE documents
 SET ocr_status = 'processing'
-WHERE id = $1 AND ocr_status = 'pending' AND deleted_at IS NULL
+WHERE id = $1 AND ocr_status = 'pending' AND deleted_at IS NULL AND upload_complete
 `
 
 // ClaimDocumentForOCR is the consumer's idempotency guard: exactly one
@@ -57,10 +57,76 @@ func (q *Queries) ClaimDocumentForOCR(ctx context.Context, id uuid.UUID) (int64,
 	return result.RowsAffected(), nil
 }
 
+const claimStaleOCRSubmissions = `-- name: ClaimStaleOCRSubmissions :many
+WITH candidates AS (
+    SELECT d.id
+    FROM documents d
+    WHERE d.deleted_at IS NULL
+      AND d.ocr_status = 'pending'
+      AND d.ocr_document_id IS NULL
+      AND d.upload_complete
+      AND d.created_at < $1
+      AND (d.ocr_submit_attempted_at IS NULL OR d.ocr_submit_attempted_at < $2)
+    ORDER BY COALESCE(d.ocr_submit_attempted_at, d.created_at), d.created_at
+    LIMIT $3
+    FOR UPDATE OF d SKIP LOCKED
+)
+UPDATE documents d
+SET ocr_submit_attempted_at = now()
+FROM candidates c, projects p
+WHERE d.id = c.id AND p.id = d.project_id
+RETURNING d.id, p.organization_id, d.uploaded_by, d.storage_path, d.file_size, d.mime_type
+`
+
+type ClaimStaleOCRSubmissionsParams struct {
+	CreatedAt            time.Time          `json:"created_at"`
+	OcrSubmitAttemptedAt pgtype.Timestamptz `json:"ocr_submit_attempted_at"`
+	Limit                int32              `json:"limit"`
+}
+
+type ClaimStaleOCRSubmissionsRow struct {
+	ID             uuid.UUID `json:"id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
+	UploadedBy     uuid.UUID `json:"uploaded_by"`
+	StoragePath    string    `json:"storage_path"`
+	FileSize       int64     `json:"file_size"`
+	MimeType       string    `json:"mime_type"`
+}
+
+// Claim a bounded batch before calling the gateway. The timestamp provides
+// retry backoff and prevents one permanently failing row from starving later
+// documents when multiple worker instances run.
+func (q *Queries) ClaimStaleOCRSubmissions(ctx context.Context, arg ClaimStaleOCRSubmissionsParams) ([]ClaimStaleOCRSubmissionsRow, error) {
+	rows, err := q.db.Query(ctx, claimStaleOCRSubmissions, arg.CreatedAt, arg.OcrSubmitAttemptedAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ClaimStaleOCRSubmissionsRow{}
+	for rows.Next() {
+		var i ClaimStaleOCRSubmissionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrganizationID,
+			&i.UploadedBy,
+			&i.StoragePath,
+			&i.FileSize,
+			&i.MimeType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const completeDocumentOCR = `-- name: CompleteDocumentOCR :execrows
 UPDATE documents
 SET ocr_status = $2, ocr_data = $3, ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL AND upload_complete
 `
 
 type CompleteDocumentOCRParams struct {
@@ -71,6 +137,20 @@ type CompleteDocumentOCRParams struct {
 
 func (q *Queries) CompleteDocumentOCR(ctx context.Context, arg CompleteDocumentOCRParams) (int64, error) {
 	result, err := q.db.Exec(ctx, completeDocumentOCR, arg.ID, arg.OcrStatus, arg.OcrData)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const completeDocumentUpload = `-- name: CompleteDocumentUpload :execrows
+UPDATE documents
+SET upload_complete = true
+WHERE id = $1 AND upload_complete = false AND deleted_at IS NULL
+`
+
+func (q *Queries) CompleteDocumentUpload(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, completeDocumentUpload, id)
 	if err != nil {
 		return 0, err
 	}
@@ -160,7 +240,7 @@ func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) 
 const failDocumentOCR = `-- name: FailDocumentOCR :execrows
 UPDATE documents
 SET ocr_status = 'failed', ocr_processed_at = now()
-WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL
+WHERE id = $1 AND ocr_status = 'processing' AND deleted_at IS NULL AND upload_complete
 `
 
 func (q *Queries) FailDocumentOCR(ctx context.Context, id uuid.UUID) (int64, error) {
@@ -178,7 +258,7 @@ SELECT d.id, d.project_id, d.transaction_id, d.storage_path, d.file_name, d.file
        d.created_at, d.deleted_at
 FROM documents d
          JOIN projects p ON p.id = d.project_id
-WHERE d.id = $1 AND p.organization_id = $2 AND d.deleted_at IS NULL
+WHERE d.id = $1 AND p.organization_id = $2 AND d.deleted_at IS NULL AND d.upload_complete
 `
 
 type GetDocumentParams struct {
@@ -239,7 +319,7 @@ SELECT d.id, d.project_id, d.transaction_id, d.storage_path, d.file_name, d.file
        p.organization_id
 FROM documents d
          JOIN projects p ON p.id = d.project_id
-WHERE d.id = $1 AND d.deleted_at IS NULL
+WHERE d.id = $1 AND d.deleted_at IS NULL AND d.upload_complete
 FOR UPDATE OF d
 `
 
@@ -293,12 +373,75 @@ func (q *Queries) GetDocumentForProcessing(ctx context.Context, id uuid.UUID) (G
 	return i, err
 }
 
+const getDocumentUploadByKey = `-- name: GetDocumentUploadByKey :one
+SELECT id, project_id, transaction_id, storage_path, file_name, file_size, mime_type,
+       file_hash, ocr_status, ocr_data, ocr_processed_at, uploaded_by, uploaded_by_name,
+       uploaded_by_email, uploaded_by_role, created_at, deleted_at, idempotency_key, upload_complete
+FROM documents
+WHERE project_id = $1 AND uploaded_by = $2 AND idempotency_key = $3
+`
+
+type GetDocumentUploadByKeyParams struct {
+	ProjectID      uuid.UUID  `json:"project_id"`
+	UploadedBy     uuid.UUID  `json:"uploaded_by"`
+	IdempotencyKey *uuid.UUID `json:"idempotency_key"`
+}
+
+type GetDocumentUploadByKeyRow struct {
+	ID              uuid.UUID          `json:"id"`
+	ProjectID       uuid.UUID          `json:"project_id"`
+	TransactionID   *uuid.UUID         `json:"transaction_id"`
+	StoragePath     string             `json:"storage_path"`
+	FileName        string             `json:"file_name"`
+	FileSize        int64              `json:"file_size"`
+	MimeType        string             `json:"mime_type"`
+	FileHash        pgtype.Text        `json:"file_hash"`
+	OcrStatus       string             `json:"ocr_status"`
+	OcrData         []byte             `json:"ocr_data"`
+	OcrProcessedAt  pgtype.Timestamptz `json:"ocr_processed_at"`
+	UploadedBy      uuid.UUID          `json:"uploaded_by"`
+	UploadedByName  string             `json:"uploaded_by_name"`
+	UploadedByEmail string             `json:"uploaded_by_email"`
+	UploadedByRole  string             `json:"uploaded_by_role"`
+	CreatedAt       time.Time          `json:"created_at"`
+	DeletedAt       pgtype.Timestamptz `json:"deleted_at"`
+	IdempotencyKey  *uuid.UUID         `json:"idempotency_key"`
+	UploadComplete  bool               `json:"upload_complete"`
+}
+
+func (q *Queries) GetDocumentUploadByKey(ctx context.Context, arg GetDocumentUploadByKeyParams) (GetDocumentUploadByKeyRow, error) {
+	row := q.db.QueryRow(ctx, getDocumentUploadByKey, arg.ProjectID, arg.UploadedBy, arg.IdempotencyKey)
+	var i GetDocumentUploadByKeyRow
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.TransactionID,
+		&i.StoragePath,
+		&i.FileName,
+		&i.FileSize,
+		&i.MimeType,
+		&i.FileHash,
+		&i.OcrStatus,
+		&i.OcrData,
+		&i.OcrProcessedAt,
+		&i.UploadedBy,
+		&i.UploadedByName,
+		&i.UploadedByEmail,
+		&i.UploadedByRole,
+		&i.CreatedAt,
+		&i.DeletedAt,
+		&i.IdempotencyKey,
+		&i.UploadComplete,
+	)
+	return i, err
+}
+
 const listDocumentsByProject = `-- name: ListDocumentsByProject :many
 SELECT id, project_id, transaction_id, storage_path, file_name, file_size, mime_type, file_hash,
        ocr_status, ocr_data, ocr_processed_at, uploaded_by, uploaded_by_name, uploaded_by_email,
        uploaded_by_role, created_at, deleted_at
 FROM documents
-WHERE project_id = $1 AND deleted_at IS NULL
+WHERE project_id = $1 AND deleted_at IS NULL AND upload_complete
 ORDER BY created_at ASC
 `
 
@@ -365,7 +508,7 @@ SELECT id, project_id, transaction_id, storage_path, file_name, file_size, mime_
        ocr_status, ocr_data, ocr_processed_at, uploaded_by, uploaded_by_name, uploaded_by_email,
        uploaded_by_role, created_at, deleted_at
 FROM documents
-WHERE transaction_id = $1 AND deleted_at IS NULL
+WHERE transaction_id = $1 AND deleted_at IS NULL AND upload_complete
 ORDER BY created_at ASC
 `
 
@@ -433,6 +576,7 @@ FROM documents
 WHERE deleted_at IS NULL
   AND ocr_status IN ('pending', 'processing')
   AND ocr_document_id IS NOT NULL
+  AND upload_complete
   AND created_at < $1
 ORDER BY created_at
 LIMIT $2
@@ -449,8 +593,7 @@ type ListStaleOCRDocumentsRow struct {
 }
 
 // Documents still waiting on OCR past the sweep threshold that have a job id
-// to ask about. Rows without ocr_document_id predate submit-response storage
-// and can only be resolved by the routed event.
+// to ask about; documents without a job ID are handled by ClaimStaleOCRSubmissions.
 func (q *Queries) ListStaleOCRDocuments(ctx context.Context, arg ListStaleOCRDocumentsParams) ([]ListStaleOCRDocumentsRow, error) {
 	rows, err := q.db.Query(ctx, listStaleOCRDocuments, arg.CreatedAt, arg.Limit)
 	if err != nil {
@@ -471,11 +614,120 @@ func (q *Queries) ListStaleOCRDocuments(ctx context.Context, arg ListStaleOCRDoc
 	return items, nil
 }
 
+const lockDocumentUpload = `-- name: LockDocumentUpload :one
+SELECT id, project_id, transaction_id, storage_path, file_name, file_size, mime_type,
+       file_hash, ocr_status, ocr_data, ocr_processed_at, uploaded_by, uploaded_by_name,
+       uploaded_by_email, uploaded_by_role, created_at, deleted_at, idempotency_key, upload_complete
+FROM documents
+WHERE id = $1 AND deleted_at IS NULL
+FOR UPDATE
+`
+
+type LockDocumentUploadRow struct {
+	ID              uuid.UUID          `json:"id"`
+	ProjectID       uuid.UUID          `json:"project_id"`
+	TransactionID   *uuid.UUID         `json:"transaction_id"`
+	StoragePath     string             `json:"storage_path"`
+	FileName        string             `json:"file_name"`
+	FileSize        int64              `json:"file_size"`
+	MimeType        string             `json:"mime_type"`
+	FileHash        pgtype.Text        `json:"file_hash"`
+	OcrStatus       string             `json:"ocr_status"`
+	OcrData         []byte             `json:"ocr_data"`
+	OcrProcessedAt  pgtype.Timestamptz `json:"ocr_processed_at"`
+	UploadedBy      uuid.UUID          `json:"uploaded_by"`
+	UploadedByName  string             `json:"uploaded_by_name"`
+	UploadedByEmail string             `json:"uploaded_by_email"`
+	UploadedByRole  string             `json:"uploaded_by_role"`
+	CreatedAt       time.Time          `json:"created_at"`
+	DeletedAt       pgtype.Timestamptz `json:"deleted_at"`
+	IdempotencyKey  *uuid.UUID         `json:"idempotency_key"`
+	UploadComplete  bool               `json:"upload_complete"`
+}
+
+// Upload completion locks before emitting the audit event. Retries may write
+// the same bytes to the reserved object key, but only one completes the row.
+func (q *Queries) LockDocumentUpload(ctx context.Context, id uuid.UUID) (LockDocumentUploadRow, error) {
+	row := q.db.QueryRow(ctx, lockDocumentUpload, id)
+	var i LockDocumentUploadRow
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.TransactionID,
+		&i.StoragePath,
+		&i.FileName,
+		&i.FileSize,
+		&i.MimeType,
+		&i.FileHash,
+		&i.OcrStatus,
+		&i.OcrData,
+		&i.OcrProcessedAt,
+		&i.UploadedBy,
+		&i.UploadedByName,
+		&i.UploadedByEmail,
+		&i.UploadedByRole,
+		&i.CreatedAt,
+		&i.DeletedAt,
+		&i.IdempotencyKey,
+		&i.UploadComplete,
+	)
+	return i, err
+}
+
+const reserveDocumentUpload = `-- name: ReserveDocumentUpload :one
+INSERT INTO documents (id, project_id, transaction_id, storage_path, file_name, file_size,
+                       mime_type, file_hash, uploaded_by, uploaded_by_name, uploaded_by_email,
+                       uploaded_by_role, idempotency_key, upload_complete)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false)
+ON CONFLICT (project_id, uploaded_by, idempotency_key)
+    WHERE idempotency_key IS NOT NULL DO NOTHING
+RETURNING id
+`
+
+type ReserveDocumentUploadParams struct {
+	ID              uuid.UUID   `json:"id"`
+	ProjectID       uuid.UUID   `json:"project_id"`
+	TransactionID   *uuid.UUID  `json:"transaction_id"`
+	StoragePath     string      `json:"storage_path"`
+	FileName        string      `json:"file_name"`
+	FileSize        int64       `json:"file_size"`
+	MimeType        string      `json:"mime_type"`
+	FileHash        pgtype.Text `json:"file_hash"`
+	UploadedBy      uuid.UUID   `json:"uploaded_by"`
+	UploadedByName  string      `json:"uploaded_by_name"`
+	UploadedByEmail string      `json:"uploaded_by_email"`
+	UploadedByRole  string      `json:"uploaded_by_role"`
+	IdempotencyKey  *uuid.UUID  `json:"idempotency_key"`
+}
+
+func (q *Queries) ReserveDocumentUpload(ctx context.Context, arg ReserveDocumentUploadParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, reserveDocumentUpload,
+		arg.ID,
+		arg.ProjectID,
+		arg.TransactionID,
+		arg.StoragePath,
+		arg.FileName,
+		arg.FileSize,
+		arg.MimeType,
+		arg.FileHash,
+		arg.UploadedBy,
+		arg.UploadedByName,
+		arg.UploadedByEmail,
+		arg.UploadedByRole,
+		arg.IdempotencyKey,
+	)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const setOcrDocumentID = `-- name: SetOcrDocumentID :execrows
 UPDATE documents
 SET ocr_document_id = $2
 WHERE id = $1
   AND ocr_document_id IS NULL
+  AND upload_complete
+  AND deleted_at IS NULL
 `
 
 type SetOcrDocumentIDParams struct {
@@ -496,7 +748,7 @@ func (q *Queries) SetOcrDocumentID(ctx context.Context, arg SetOcrDocumentIDPara
 const softDeleteDocument = `-- name: SoftDeleteDocument :execrows
 UPDATE documents
 SET deleted_at = now()
-WHERE id = $1 AND deleted_at IS NULL
+WHERE id = $1 AND deleted_at IS NULL AND upload_complete
 `
 
 func (q *Queries) SoftDeleteDocument(ctx context.Context, id uuid.UUID) (int64, error) {

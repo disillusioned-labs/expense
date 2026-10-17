@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -18,6 +20,16 @@ import (
 )
 
 var tracer = otel.Tracer("service/role")
+
+var errRoleNameInvalid = service.NewError("ROLE_NAME_INVALID", 422, "role name must contain non-whitespace text and be at most 100 characters")
+
+func normalizeRoleName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || utf8.RuneCountInString(name) > 100 {
+		return "", errRoleNameInvalid
+	}
+	return name, nil
+}
 
 type RoleService interface {
 	EnsureSeed(ctx context.Context, actor authz.Actor, projectID uuid.UUID) error
@@ -136,14 +148,19 @@ func (s *roleService) Create(ctx context.Context, actor authz.Actor, projectID u
 	ctx, span := tracer.Start(ctx, "RoleService.Create")
 	defer span.End()
 
+	name, err := normalizeRoleName(in.Name)
+	if err != nil {
+		return Role{}, err
+	}
+
 	for _, a := range in.Actions {
 		if !constant.IsValidAction(a) {
 			return Role{}, service.ErrInvalidAction
 		}
 	}
-	name, actions := in.Name, in.Actions
+	actions := in.Actions
 	var created repository.Role
-	err := s.repo.ExecTx(ctx, func(q repository.Querier) error {
+	err = s.repo.ExecTx(ctx, func(q repository.Querier) error {
 		_, err := q.GetRoleByName(ctx, repository.GetRoleByNameParams{
 			ProjectID: projectID,
 			Name:      name,
@@ -279,6 +296,13 @@ func (s *roleService) List(ctx context.Context, _ authz.Actor, projectID uuid.UU
 func (s *roleService) Update(ctx context.Context, actor authz.Actor, projectID, id uuid.UUID, in UpdateInput) (Role, error) {
 	ctx, span := tracer.Start(ctx, "RoleService.Update")
 	defer span.End()
+	if in.Name != nil {
+		name, err := normalizeRoleName(*in.Name)
+		if err != nil {
+			return Role{}, err
+		}
+		in.Name = &name
+	}
 
 	if in.Actions != nil {
 		for _, a := range *in.Actions {

@@ -49,24 +49,27 @@ type ApprovalRule struct {
 }
 
 type Document struct {
-	ID              uuid.UUID          `json:"id"`
-	TransactionID   *uuid.UUID         `json:"transaction_id"`
-	StoragePath     string             `json:"storage_path"`
-	FileName        string             `json:"file_name"`
-	FileSize        int64              `json:"file_size"`
-	MimeType        string             `json:"mime_type"`
-	FileHash        pgtype.Text        `json:"file_hash"`
-	OcrStatus       string             `json:"ocr_status"`
-	OcrData         []byte             `json:"ocr_data"`
-	OcrProcessedAt  pgtype.Timestamptz `json:"ocr_processed_at"`
-	UploadedBy      uuid.UUID          `json:"uploaded_by"`
-	CreatedAt       time.Time          `json:"created_at"`
-	DeletedAt       pgtype.Timestamptz `json:"deleted_at"`
-	ProjectID       uuid.UUID          `json:"project_id"`
-	UploadedByName  string             `json:"uploaded_by_name"`
-	UploadedByEmail string             `json:"uploaded_by_email"`
-	UploadedByRole  string             `json:"uploaded_by_role"`
-	OcrDocumentID   *uuid.UUID         `json:"ocr_document_id"`
+	ID                   uuid.UUID          `json:"id"`
+	TransactionID        *uuid.UUID         `json:"transaction_id"`
+	StoragePath          string             `json:"storage_path"`
+	FileName             string             `json:"file_name"`
+	FileSize             int64              `json:"file_size"`
+	MimeType             string             `json:"mime_type"`
+	FileHash             pgtype.Text        `json:"file_hash"`
+	OcrStatus            string             `json:"ocr_status"`
+	OcrData              []byte             `json:"ocr_data"`
+	OcrProcessedAt       pgtype.Timestamptz `json:"ocr_processed_at"`
+	UploadedBy           uuid.UUID          `json:"uploaded_by"`
+	CreatedAt            time.Time          `json:"created_at"`
+	DeletedAt            pgtype.Timestamptz `json:"deleted_at"`
+	ProjectID            uuid.UUID          `json:"project_id"`
+	UploadedByName       string             `json:"uploaded_by_name"`
+	UploadedByEmail      string             `json:"uploaded_by_email"`
+	UploadedByRole       string             `json:"uploaded_by_role"`
+	OcrDocumentID        *uuid.UUID         `json:"ocr_document_id"`
+	IdempotencyKey       *uuid.UUID         `json:"idempotency_key"`
+	UploadComplete       bool               `json:"upload_complete"`
+	OcrSubmitAttemptedAt pgtype.Timestamptz `json:"ocr_submit_attempted_at"`
 }
 
 type OutboxEvent struct {

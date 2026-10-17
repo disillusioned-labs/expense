@@ -22,8 +22,10 @@ const (
 	CodeMethodNotAllowed = "METHOD_NOT_ALLOWED"
 	CodePayloadTooLarge  = "PAYLOAD_TOO_LARGE"
 	CodeRateLimited      = "RATE_LIMITED"
-	CodeTimeout          = "TIMEOUT"
-	CodeInternal         = "INTERNAL"
+	// CodeRateLimitUnavailable indicates the shared Redis limiter could not check a request.
+	CodeRateLimitUnavailable = "RATE_LIMIT_UNAVAILABLE"
+	CodeTimeout              = "TIMEOUT"
+	CodeInternal             = "INTERNAL"
 )
 
 type Meta struct {

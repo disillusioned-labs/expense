@@ -88,9 +88,9 @@ func buildDeps(
 	roleSvc := roleservice.NewRoleService(repo, log)
 	projectSvc := projectservice.NewProjectService(repo, authorizer, log)
 
-	transactionSvc := transactionservice.NewTransactionService(repo, authorizer, storage, identityClient, log)
+	transactionSvc := transactionservice.NewTransactionService(repo, authorizer, storage, cfg.Storage.S3.Bucket, identityClient, log)
 
-	documentSvc := documentservice.NewDocumentService(repo, authorizer, storage, ocrSubmitter, identityClient, log)
+	documentSvc := documentservice.NewDocumentService(repo, authorizer, storage, cfg.Storage.S3.Bucket, ocrSubmitter, identityClient, log)
 
 	approvalSvc := approvalservice.NewApprovalService(repo, authorizer, identityClient, log)
 

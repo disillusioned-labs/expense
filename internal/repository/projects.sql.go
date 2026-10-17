@@ -41,6 +41,17 @@ func (q *Queries) ArchiveProject(ctx context.Context, arg ArchiveProjectParams) 
 	return i, err
 }
 
+const countProjectDocuments = `-- name: CountProjectDocuments :one
+SELECT COUNT(*) FROM documents WHERE project_id = $1
+`
+
+func (q *Queries) CountProjectDocuments(ctx context.Context, projectID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countProjectDocuments, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countProjectTransactions = `-- name: CountProjectTransactions :one
 SELECT COUNT(*) FROM transactions WHERE project_id = $1 AND deleted_at IS NULL
 `
@@ -95,6 +106,37 @@ func (q *Queries) DeleteProjectMember(ctx context.Context, arg DeleteProjectMemb
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const deleteProjectMembersForOrganizationUser = `-- name: DeleteProjectMembersForOrganizationUser :many
+DELETE FROM project_members
+WHERE organization_id = $1 AND user_id = $2
+RETURNING project_id
+`
+
+type DeleteProjectMembersForOrganizationUserParams struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	UserID         uuid.UUID `json:"user_id"`
+}
+
+func (q *Queries) DeleteProjectMembersForOrganizationUser(ctx context.Context, arg DeleteProjectMembersForOrganizationUserParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, deleteProjectMembersForOrganizationUser, arg.OrganizationID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var project_id uuid.UUID
+		if err := rows.Scan(&project_id); err != nil {
+			return nil, err
+		}
+		items = append(items, project_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getProject = `-- name: GetProject :one
@@ -319,6 +361,34 @@ type LockProjectForDeleteParams struct {
 
 func (q *Queries) LockProjectForDelete(ctx context.Context, arg LockProjectForDeleteParams) (Project, error) {
 	row := q.db.QueryRow(ctx, lockProjectForDelete, arg.ID, arg.OrganizationID)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.Name,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.ArchivedAt,
+	)
+	return i, err
+}
+
+const lockProjectForDocumentUpload = `-- name: LockProjectForDocumentUpload :one
+SELECT id, organization_id, name, created_by, created_at, updated_at, deleted_at, archived_at
+FROM projects
+WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL
+FOR UPDATE
+`
+
+type LockProjectForDocumentUploadParams struct {
+	ID             uuid.UUID `json:"id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
+}
+
+func (q *Queries) LockProjectForDocumentUpload(ctx context.Context, arg LockProjectForDocumentUploadParams) (Project, error) {
+	row := q.db.QueryRow(ctx, lockProjectForDocumentUpload, arg.ID, arg.OrganizationID)
 	var i Project
 	err := row.Scan(
 		&i.ID,

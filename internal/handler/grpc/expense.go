@@ -20,6 +20,7 @@ import (
 	"github.com/disillusioned-labs/expense/internal/authz"
 	"github.com/disillusioned-labs/expense/internal/service"
 	approvalservice "github.com/disillusioned-labs/expense/internal/service/approval"
+	projectservice "github.com/disillusioned-labs/expense/internal/service/project"
 	expensepb "github.com/disillusioned-labs/platform/contract/expense"
 )
 
@@ -29,12 +30,13 @@ var tracer = otel.Tracer("handler/grpc")
 type ExpenseServer struct {
 	expensepb.UnimplementedExpenseServiceServer
 	approvals  approvalservice.ApprovalService
+	projects   projectservice.ProjectService
 	authorizer *authz.Authorizer
 	log        *slog.Logger
 }
 
-func NewExpenseServer(approvals approvalservice.ApprovalService, authorizer *authz.Authorizer, log *slog.Logger) *ExpenseServer {
-	return &ExpenseServer{approvals: approvals, authorizer: authorizer, log: log}
+func NewExpenseServer(approvals approvalservice.ApprovalService, projects projectservice.ProjectService, authorizer *authz.Authorizer, log *slog.Logger) *ExpenseServer {
+	return &ExpenseServer{approvals: approvals, projects: projects, authorizer: authorizer, log: log}
 }
 
 // CheckApproverAssignments answers identity's pre-removal check: the caller
@@ -115,6 +117,42 @@ func (s *ExpenseServer) ReassignApproverRules(
 	return &expensepb.ReassignApproverRulesResponse{Reassigned: reassigned}, nil
 }
 
+// ClearRejoinedMemberProjectAccess clears stale project placements before an
+// organization reactivates a formerly removed member.
+func (s *ExpenseServer) ClearRejoinedMemberProjectAccess(
+	ctx context.Context,
+	req *expensepb.ClearRejoinedMemberProjectAccessRequest,
+) (*expensepb.ClearRejoinedMemberProjectAccessResponse, error) {
+	ctx, span := tracer.Start(ctx, "ExpenseServer.ClearRejoinedMemberProjectAccess")
+	defer span.End()
+
+	orgID, userID, err := parseOrgUser(req.GetOrganizationId(), req.GetUserId())
+	if err != nil {
+		return nil, err
+	}
+	actorID, err := uuid.Parse(req.GetActorId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid actor_id")
+	}
+	actor := authz.Actor{OrgID: orgID, UserID: actorID}
+	if err := s.authorizer.CheckAdmin(ctx, actor); err != nil {
+		return nil, writeServiceErr(ctx, err)
+	}
+	active, err := s.authorizer.IsMemberActiveStrict(ctx, actor, userID)
+	if err != nil {
+		return nil, writeServiceErr(ctx, err)
+	}
+	if active {
+		return nil, status.Error(codes.FailedPrecondition, "project access can only be cleared for an inactive member")
+	}
+	removed, err := s.projects.ClearOrganizationMemberPlacements(ctx, actor, userID)
+	if err != nil {
+		return nil, writeServiceErr(ctx, err)
+	}
+	span.SetAttributes(attribute.Int64("project_placements.removed", removed))
+	return &expensepb.ClearRejoinedMemberProjectAccessResponse{Removed: removed}, nil
+}
+
 func parseOrgUser(orgIDStr, userIDStr string) (uuid.UUID, uuid.UUID, error) {
 	orgID, err := uuid.Parse(orgIDStr)
 	if err != nil {
@@ -147,6 +185,8 @@ func writeServiceErr(ctx context.Context, err error) error {
 			return status.Error(codes.NotFound, svcErr.Message)
 		case 409:
 			return status.Error(codes.AlreadyExists, svcErr.Message)
+		case 503:
+			return status.Error(codes.Unavailable, svcErr.Message)
 		default:
 			return status.Error(codes.Internal, svcErr.Message)
 		}

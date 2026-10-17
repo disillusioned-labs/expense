@@ -7,7 +7,7 @@ import (
 type ItemRequest struct {
 	Description string `json:"description" validate:"required"`
 	Quantity    int32  `json:"quantity" validate:"min=1"`
-	Amount      int64  `json:"amount" validate:"min=0"`
+	Amount      int64  `json:"amount,string" validate:"min=0"`
 }
 
 type UpdateRequest struct {

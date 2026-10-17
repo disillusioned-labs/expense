@@ -48,13 +48,14 @@ type TransactionService interface {
 type transactionService struct {
 	repo     repository.Store
 	authz    *authz.Authorizer
-	storage  *s3.Client
+	storage  s3.Store
+	bucket   string
 	identity contract.IdentityClient
 	log      *slog.Logger
 }
 
-func NewTransactionService(repo repository.Store, authorizer *authz.Authorizer, storage *s3.Client, identity contract.IdentityClient, log *slog.Logger) TransactionService {
-	return &transactionService{repo: repo, authz: authorizer, storage: storage, identity: identity, log: log}
+func NewTransactionService(repo repository.Store, authorizer *authz.Authorizer, storage s3.Store, bucket string, identity contract.IdentityClient, log *slog.Logger) TransactionService {
+	return &transactionService{repo: repo, authz: authorizer, storage: storage, bucket: bucket, identity: identity, log: log}
 }
 
 const maxItems = 200
@@ -63,10 +64,16 @@ func validateItems(items []ItemInput) error {
 	if len(items) > maxItems {
 		return service.ErrTooManyItems
 	}
+	const maxInt64 = int64(1<<63 - 1)
+	total := int64(0)
 	for _, it := range items {
 		if it.Description == "" || it.Quantity <= 0 || it.Amount < 0 {
 			return service.ErrItemInvalid
 		}
+		if it.Amount > maxInt64-total {
+			return service.ErrInvalidAmount
+		}
+		total += it.Amount
 	}
 	return nil
 }
@@ -270,7 +277,7 @@ func (s *transactionService) buildDetail(ctx context.Context, t repository.Trans
 
 func (s *transactionService) fileURL(ctx context.Context, path, filename string) string {
 	duration := time.Duration(constant.DocumentPresignTTL) * time.Minute
-	url, err := s.storage.PresignGet(ctx, constant.DocumentBucket, path, duration, filename)
+	url, err := s.storage.PresignGet(ctx, s.bucket, path, duration, filename)
 	if err != nil {
 		s.log.WarnContext(ctx, "presign failed;", "error", err, "path", path)
 		return ""

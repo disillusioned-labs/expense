@@ -1,9 +1,7 @@
-// sweep.go is the reconciliation safety net: routed Kafka events are the
-// primary OCR result delivery, but a lost event (or a consumer down past the
-// retention window) would leave a document pending forever. The sweep asks
-// the gateway about stale documents via Kontrak A GetDocument and feeds
-// terminal answers through the same Handle path as events - the claim keeps
-// the two delivery paths from double-processing one document.
+// sweep.go is the OCR reconciliation safety net: it retries stale uploads
+// missing a gateway job ID and asks for terminal status when routed events are
+// lost. The claim keeps worker instances and the event path from duplicating
+// document processing.
 package ocrconsumer
 
 import (
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/disillusioned-labs/expense/internal/contract"
 	"github.com/disillusioned-labs/expense/internal/ocr"
@@ -23,20 +22,99 @@ import (
 // gateway directly.
 type Sweeper struct {
 	Service
-	repo     repository.Store
-	statuses ocr.StatusReader
-	log      *slog.Logger
+	repo      repository.Store
+	statuses  ocr.StatusReader
+	submitter ocr.Submitter
+	bucket    string
+	identity  contract.IdentityClient
+	log       *slog.Logger
 }
 
-// NewSweeper builds the sweep; statuses is the gateway-backed StatusReader
-// and the embedded Service applies terminal answers through its Handle path.
-func NewSweeper(repo repository.Store, statuses ocr.StatusReader, identity contract.IdentityClient, log *slog.Logger) *Sweeper {
+// NewSweeper builds OCR recovery; the embedded Service applies terminal
+// answers through its Handle path.
+func NewSweeper(repo repository.Store, statuses ocr.StatusReader, submitter ocr.Submitter, bucket string, identity contract.IdentityClient, log *slog.Logger) *Sweeper {
 	return &Sweeper{
-		Service:  NewService(repo, identity, log),
-		repo:     repo,
-		statuses: statuses,
-		log:      log,
+		Service:   NewService(repo, identity, log),
+		repo:      repo,
+		statuses:  statuses,
+		submitter: submitter,
+		bucket:    bucket,
+		identity:  identity,
+		log:       log,
 	}
+}
+
+// RetryUnsubmitted resubmits stale uploaded documents that never received a
+// gateway job ID. Expense document IDs are stable gateway idempotency keys,
+// so a lost submit response safely resolves to the existing job.
+func (s *Sweeper) RetryUnsubmitted(ctx context.Context, olderThan, retryAfter time.Duration, limit int) (int, error) {
+	now := time.Now()
+	docs, err := s.repo.ClaimStaleOCRSubmissions(ctx, repository.ClaimStaleOCRSubmissionsParams{
+		CreatedAt:            now.Add(-olderThan),
+		OcrSubmitAttemptedAt: pgtype.Timestamptz{Time: now.Add(-retryAfter), Valid: true},
+		Limit:                int32(limit),
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	retried := 0
+	for _, doc := range docs {
+		if ctx.Err() != nil {
+			return retried, ctx.Err()
+		}
+		lease, err := s.identity.HoldExpenseWriteAccess(ctx, doc.OrganizationID, doc.UploadedBy)
+		if err != nil {
+			s.log.ErrorContext(ctx, "ocr resubmit authorization failed", "error", err, "document_id", doc.ID)
+			continue
+		}
+		if lease.Context == nil || lease.Release == nil {
+			lease.Close()
+			s.log.ErrorContext(ctx, "ocr resubmit authorization returned an invalid lease", "document_id", doc.ID)
+			continue
+		}
+		if lease.IsDeleted || lease.IsFrozen || !lease.MemberActive || !lease.ServiceAllowed {
+			lease.Close()
+			continue
+		}
+
+		ocrID, err := s.submitter.SubmitDocument(lease.Context, ocr.SubmitInput{
+			IdempotencyKey: doc.ID.String(), ExternalRef: doc.ID.String(), DocType: "receipt",
+			Bucket: s.bucket, StoragePath: doc.StoragePath, SizeBytes: doc.FileSize, DeclaredMime: doc.MimeType,
+		})
+		if err != nil {
+			lease.Close()
+			s.log.ErrorContext(ctx, "ocr resubmit failed", "error", err, "document_id", doc.ID)
+			continue
+		}
+		if ocrID == "" {
+			lease.Close()
+			s.log.WarnContext(ctx, "ocr resubmit returned an empty job id", "document_id", doc.ID)
+			continue
+		}
+		parsedID, err := uuid.Parse(ocrID)
+		if err != nil {
+			lease.Close()
+			s.log.ErrorContext(ctx, "ocr resubmit returned an invalid job id", "document_id", doc.ID)
+			continue
+		}
+		rows, err := s.repo.SetOcrDocumentID(lease.Context, repository.SetOcrDocumentIDParams{
+			ID: doc.ID, OcrDocumentID: &parsedID,
+		})
+		lease.Close()
+		if err != nil {
+			s.log.ErrorContext(ctx, "saving recovered ocr job id failed", "error", err, "document_id", doc.ID)
+			continue
+		}
+		if rows == 0 {
+			continue
+		}
+
+		retried++
+		s.log.InfoContext(ctx, "stale document submitted to ocr gateway", "document_id", doc.ID)
+	}
+
+	return retried, nil
 }
 
 // SweepStale asks the gateway once per document whose OCR has been pending

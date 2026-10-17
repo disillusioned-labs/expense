@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -217,7 +218,7 @@ func (s *approvalService) Decide(ctx context.Context, actor authz.Actor, approva
 	if decision != constant.DecisionApproved && decision != constant.DecisionRejected {
 		return DecideResult{}, service.ErrInvalidTransition
 	}
-	if decision == constant.DecisionRejected && (notes == nil || *notes == "") {
+	if decision == constant.DecisionRejected && (notes == nil || strings.TrimSpace(*notes) == "") {
 		return DecideResult{}, service.ErrSubmitValidation
 	}
 

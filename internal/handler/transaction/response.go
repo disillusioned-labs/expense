@@ -28,14 +28,14 @@ type ItemResponse struct {
 	ID          uuid.UUID `json:"id"`
 	Description string    `json:"description"`
 	Quantity    int32     `json:"quantity"`
-	Amount      int64     `json:"amount"`
+	Amount      int64     `json:"amount,string"`
 }
 
 type TransactionResponse struct {
 	ID            uuid.UUID          `json:"id"`
 	Status        string             `json:"status"`
 	Version       int64              `json:"version"`
-	TotalAmount   int64              `json:"total_amount"`
+	TotalAmount   int64              `json:"total_amount,string"`
 	Currency      string             `json:"currency"`
 	Category      *string            `json:"category"`
 	Description   *string            `json:"description"`

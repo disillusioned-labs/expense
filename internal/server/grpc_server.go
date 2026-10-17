@@ -10,6 +10,7 @@ import (
 	"github.com/disillusioned-labs/expense/internal/config"
 	grpchandler "github.com/disillusioned-labs/expense/internal/handler/grpc"
 	approvalservice "github.com/disillusioned-labs/expense/internal/service/approval"
+	projectservice "github.com/disillusioned-labs/expense/internal/service/project"
 	expensepb "github.com/disillusioned-labs/platform/contract/expense"
 	platformgrpc "github.com/disillusioned-labs/platform/grpc"
 )
@@ -22,13 +23,31 @@ type GRPCServer struct {
 	cfg  *config.Config
 }
 
-func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.ApprovalService, authorizer *authz.Authorizer) (*GRPCServer, error) {
+func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.ApprovalService, projects projectservice.ProjectService, authorizer *authz.Authorizer) (*GRPCServer, error) {
 	opts := []platformgrpc.Option{
 		platformgrpc.WithMaxRecvMsgSize(cfg.GRPC.MaxRecvMsgSize),
 		platformgrpc.WithMaxSendMsgSize(cfg.GRPC.MaxSendMsgSize),
 		platformgrpc.WithMaxHeaderSize(cfg.GRPC.MaxHeaderSize),
 		platformgrpc.WithLogger(log),
 		platformgrpc.WithUnaryServerInterceptor(platformgrpc.UnaryRequestIDServer(log)),
+	}
+	if cfg.Service.Env != "development" || cfg.GRPCAuth.IdentityServiceTokens != "" {
+		identityTokens, err := platformgrpc.ParseServiceTokens(cfg.GRPCAuth.IdentityServiceTokens)
+		if err != nil {
+			return nil, fmt.Errorf("parse identity gRPC service tokens: %w", err)
+		}
+		unaryAuth, _, err := platformgrpc.NewServiceAuthInterceptors(
+			map[string][]string{"identity": identityTokens},
+			map[string][]string{
+				expensepb.ExpenseService_CheckApproverAssignments_FullMethodName:         {"identity"},
+				expensepb.ExpenseService_ReassignApproverRules_FullMethodName:            {"identity"},
+				expensepb.ExpenseService_ClearRejoinedMemberProjectAccess_FullMethodName: {"identity"},
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("configure expense gRPC service auth: %w", err)
+		}
+		opts = append(opts, platformgrpc.WithUnaryServerInterceptor(unaryAuth))
 	}
 	if cfg.GRPC.TLS.Enabled {
 		tlsConfig, err := platformgrpc.NewTLSConfig(
@@ -49,7 +68,7 @@ func NewGRPC(cfg *config.Config, log *slog.Logger, approvals approvalservice.App
 		return nil, fmt.Errorf("grpc server: %w", err)
 	}
 
-	expenseServer := grpchandler.NewExpenseServer(approvals, authorizer, log)
+	expenseServer := grpchandler.NewExpenseServer(approvals, projects, authorizer, log)
 	expensepb.RegisterExpenseServiceServer(grpcServer.GRPC(), expenseServer)
 
 	return &GRPCServer{grpc: grpcServer, log: log, cfg: cfg}, nil

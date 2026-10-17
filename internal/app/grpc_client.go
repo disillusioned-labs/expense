@@ -36,6 +36,16 @@ func newIdentityClient(_ context.Context, cfg *config.Config, log *slog.Logger) 
 		}
 		opts = append(opts, platformgrpc.WithTLS(tlsConfig))
 	}
+	if cfg.Identity.GRPCServiceToken != "" {
+		credentials, err := platformgrpc.NewServiceTokenCredentials(
+			cfg.Identity.GRPCServiceToken,
+			cfg.GRPCClient.TLS.Enabled,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("configure identity gRPC service credentials: %w", err)
+		}
+		opts = append(opts, platformgrpc.WithPerRPCCredentials(credentials))
+	}
 
 	client, err := platformgrpc.NewClient(cfg.Identity.GRPCTarget, opts...)
 	if err != nil {

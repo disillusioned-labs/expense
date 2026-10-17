@@ -8,8 +8,8 @@ type CreateRequest struct {
 }
 
 type UpdateRequest struct {
-	Name    *string   `json:"name"`
-	Actions *[]string `json:"actions"`
+	Name    *string   `json:"name" validate:"omitempty,min=1,max=100"`
+	Actions *[]string `json:"actions" validate:"omitempty,dive,required"`
 }
 
 func (r CreateRequest) ToInput() roleservice.CreateInput {

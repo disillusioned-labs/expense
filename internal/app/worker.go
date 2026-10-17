@@ -141,7 +141,7 @@ func RunWorker(cfg *config.Config) error {
 		}
 		defer closeGateway()
 
-		sweeper := ocrconsumer.NewSweeper(repo, gateway, identityClient, log)
+		sweeper := ocrconsumer.NewSweeper(repo, gateway, gateway, cfg.Storage.S3.Bucket, identityClient, log)
 
 		g.Go(func() error {
 			ticker := time.NewTicker(cfg.Ocr.SweepInterval)
@@ -153,6 +153,12 @@ func RunWorker(cfg *config.Config) error {
 				case <-ticker.C:
 					// A failed tick is logged, not fatal: the sweep is a
 					// safety net, never on the critical path.
+					retried, err := sweeper.RetryUnsubmitted(runCtx, cfg.Ocr.SweepAfter, cfg.Ocr.SweepInterval, cfg.Ocr.SweepBatch)
+					if err != nil {
+						log.Error("ocr resubmit tick failed", "error", err)
+					} else if retried > 0 {
+						log.Info("stale documents resubmitted to ocr gateway", "count", retried)
+					}
 					swept, err := sweeper.SweepStale(runCtx, cfg.Ocr.SweepAfter, cfg.Ocr.SweepBatch)
 					if err != nil {
 						log.Error("ocr sweep tick failed", "error", err)

@@ -16,6 +16,7 @@ import (
 	"github.com/disillusioned-labs/expense/internal/repository"
 	"github.com/disillusioned-labs/expense/internal/server"
 	approvalservice "github.com/disillusioned-labs/expense/internal/service/approval"
+	projectservice "github.com/disillusioned-labs/expense/internal/service/project"
 	"github.com/disillusioned-labs/platform/postgres"
 	"github.com/disillusioned-labs/platform/telemetry"
 
@@ -102,11 +103,12 @@ func RunGRPC(cfg *config.Config) error {
 	repo := repository.NewStore(pool)
 	authorizer := authz.NewAuthorizer(repo, identityClient, log)
 	approvalSvc := approvalservice.NewApprovalService(repo, authorizer, identityClient, log)
+	projectSvc := projectservice.NewProjectService(repo, authorizer, log)
 
 	// -------------------------------------------------------------------------
 	// gRPC server
 	// -------------------------------------------------------------------------
-	grpcSrv, err := server.NewGRPC(cfg, log, approvalSvc, authorizer)
+	grpcSrv, err := server.NewGRPC(cfg, log, approvalSvc, projectSvc, authorizer)
 	if err != nil {
 		return fmt.Errorf("create grpc server: %w", err)
 	}

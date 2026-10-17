@@ -20,6 +20,7 @@ import (
 	"github.com/disillusioned-labs/platform/authkit"
 	"github.com/disillusioned-labs/platform/cache"
 	"github.com/disillusioned-labs/platform/httpserver"
+	"github.com/disillusioned-labs/platform/ratelimit"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -55,6 +56,7 @@ func (p redisPinger) Ping(ctx context.Context) error { return p.rdb.Ping(ctx).Er
 type Deps struct {
 	Pool             *pgxpool.Pool
 	Redis            *goredis.Client
+	RateLimitRedis   *goredis.Client
 	RedisRequired    bool
 	Cache            cache.Cache
 	Verifier         *authkit.Verifier
@@ -66,6 +68,19 @@ type Deps struct {
 	TransactionHandler *transactionhandler.Handler
 	DocumentHandler    *documenthandler.Handler
 	ApprovalHandler    *approvalhandler.Handler
+}
+
+func rateLimitOptions(client *goredis.Client, prefix string, log *slog.Logger) []httprate.Option {
+	if client == nil {
+		return nil
+	}
+	return []httprate.Option{
+		httprate.WithLimitCounter(ratelimit.RedisCounter(client, prefix)),
+		httprate.WithErrorHandler(func(w http.ResponseWriter, r *http.Request, err error) {
+			log.ErrorContext(r.Context(), "distributed rate limit failed closed", "prefix", prefix, "error", err)
+			handler.WriteError(w, http.StatusServiceUnavailable, handler.CodeRateLimitUnavailable, "rate limiting is temporarily unavailable")
+		}),
+	}
 }
 
 // New assembles the router - middleware chain and probes, plus the /api/v1
@@ -119,13 +134,17 @@ func New(cfg *config.Config, log *slog.Logger, deps Deps) (*Server, error) {
 		if cfg.RateLimit.Enabled {
 			// Not httprate's KeyByRealIP: it trusts forwarded headers
 			// (GHSA-9g5q-2w5x-hmxf).
+			options := []httprate.Option{
+				httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
+					handler.WriteError(w, http.StatusTooManyRequests, handler.CodeRateLimited, "rate limit exceeded")
+				}),
+			}
+			options = append(options, rateLimitOptions(deps.RateLimitRedis, "expense:api", log)...)
 			r.Use(httprate.LimitBy(
 				cfg.RateLimit.Requests,
 				cfg.RateLimit.Window,
 				keyByRemoteIP,
-				httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) {
-					handler.WriteError(w, http.StatusTooManyRequests, handler.CodeRateLimited, "rate limit exceeded")
-				}),
+				options...,
 			))
 		}
 

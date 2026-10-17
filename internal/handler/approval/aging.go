@@ -18,7 +18,7 @@ var agingTracer = otel.Tracer("handler/approval")
 type AgingResponse struct {
 	TransactionID    string   `json:"transaction_id"`
 	Description      *string  `json:"description"`
-	TotalAmount      int64    `json:"total_amount"`
+	TotalAmount      int64    `json:"total_amount,string"`
 	Currency         string   `json:"currency"`
 	ProjectID        string   `json:"project_id"`
 	ProjectName      string   `json:"project_name"`

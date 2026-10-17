@@ -8,10 +8,11 @@ import (
 )
 
 type UploadInput struct {
-	FileName string
-	MimeType string
-	Size     int64
-	Content  io.Reader
+	IdempotencyKey uuid.UUID
+	FileName       string
+	MimeType       string
+	Size           int64
+	Content        io.ReadSeeker
 }
 
 type Document struct {

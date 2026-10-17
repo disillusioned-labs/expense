@@ -42,6 +42,8 @@ var (
 	ErrProjectArchived        = NewError("PROJECT_ARCHIVED", 409, "project is archived")
 	ErrProjectMemberChanged   = NewError("PROJECT_MEMBER_CHANGED", 409, "project member changed; refresh and try again")
 	ErrProjectMemberNotActive = NewError("PROJECT_MEMBER_NOT_ACTIVE", 422, "project member must be active in this organization")
+	ErrIdempotencyKeyRequired = NewError("IDEMPOTENCY_KEY_REQUIRED", 400, "a non-empty UUID Idempotency-Key header is required")
+	ErrIdempotencyKeyReused   = NewError("IDEMPOTENCY_KEY_REUSED", 409, "idempotency key was already used for a different or deleted upload")
 	ErrIdentityUnavailable    = NewError("IDENTITY_UNAVAILABLE", 503, "membership could not be verified")
 	ErrTooManyItems           = NewError("TOO_MANY_ITEMS", 422, "too many items")
 	ErrItemInvalid            = NewError("ITEM_INVALID", 422, "item is invalid")

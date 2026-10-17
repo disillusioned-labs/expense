@@ -352,7 +352,7 @@ SELECT a.id, a.transaction_id, a.approver_id, a.approver_name, a.approver_email,
        t.organization_id, t.status AS transaction_status, t.description, t.total_amount, t.currency,
        t.category, t.created_by, t.created_by_name, t.created_by_email, t.created_by_role,
        t.submitted_at, t.project_id, p.name AS project_name,
-       (SELECT COUNT(*) FROM documents d WHERE d.transaction_id = t.id AND d.deleted_at IS NULL) AS document_count
+       (SELECT COUNT(*) FROM documents d WHERE d.transaction_id = t.id AND d.deleted_at IS NULL AND d.upload_complete) AS document_count
 FROM approvals a
          JOIN transactions t ON t.id = a.transaction_id
          JOIN projects p ON p.id = t.project_id

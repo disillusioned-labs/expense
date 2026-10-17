@@ -97,7 +97,7 @@ type AssignedResponse struct {
 	ActivatedAt   time.Time     `json:"activated_at"`
 	TransactionID uuid.UUID     `json:"transaction_id"`
 	Status        string        `json:"transaction_status"`
-	TotalAmount   int64         `json:"total_amount"`
+	TotalAmount   int64         `json:"total_amount,string"`
 	Currency      string        `json:"currency"`
 	Description   *string       `json:"description"`
 	Category      *string       `json:"category"`

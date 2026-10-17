@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/disillusioned-labs/expense/internal/constant"
 	"github.com/disillusioned-labs/expense/internal/contract"
@@ -20,16 +21,18 @@ import (
 type fakeQuerier struct {
 	repository.Querier
 
-	claimRows  int64
-	doc        repository.GetDocumentForProcessingRow
-	completeID uuid.UUID
-	complete   repository.CompleteDocumentOCRParams
-	attached   repository.AttachDocumentToTransactionParams
-	failedID   uuid.UUID
-	created    repository.CreateTransactionParams
-	inserted   repository.InsertTransactionItemsParams
-	locked     int
-	emitted    []repository.CreateOutboxEventParams
+	claimRows         int64
+	doc               repository.GetDocumentForProcessingRow
+	completeID        uuid.UUID
+	complete          repository.CompleteDocumentOCRParams
+	attached          repository.AttachDocumentToTransactionParams
+	failedID          uuid.UUID
+	created           repository.CreateTransactionParams
+	createErr         error
+	inserted          repository.InsertTransactionItemsParams
+	lockedTotalAmount int64
+	locked            int
+	emitted           []repository.CreateOutboxEventParams
 }
 
 type fakeStore struct {
@@ -75,6 +78,9 @@ func (f *fakeQuerier) FailDocumentOCR(_ context.Context, id uuid.UUID) (int64, e
 
 func (f *fakeQuerier) CreateTransaction(_ context.Context, arg repository.CreateTransactionParams) (repository.Transaction, error) {
 	f.created = arg
+	if f.createErr != nil {
+		return repository.Transaction{}, f.createErr
+	}
 	return repository.Transaction{ID: uuid.Must(uuid.NewV7())}, nil
 }
 
@@ -82,6 +88,7 @@ func (f *fakeQuerier) LockTransaction(_ context.Context, id uuid.UUID) (reposito
 	f.locked++
 	return repository.Transaction{
 		ID: id, OrganizationID: f.doc.OrganizationID, Status: constant.StatusDraft,
+		TotalAmount: f.lockedTotalAmount,
 	}, nil
 }
 
@@ -221,6 +228,20 @@ func TestHandleCompletedAutoCreatesDraftWithUploaderSnapshot(t *testing.T) {
 	}
 }
 
+func TestHandleParksOCRResultWhenProjectNoLongerAcceptsDrafts(t *testing.T) {
+	doc := pendingDoc(nil)
+	q := &fakeQuerier{claimRows: 1, doc: doc, createErr: pgx.ErrNoRows}
+	if err := newTestService(q).Handle(context.Background(), envelope(receipt(FieldStatusExtracted), nil)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if q.completeID != doc.ID || q.complete.OcrStatus != constant.OCRStatusNeedsReview || len(q.complete.OcrData) == 0 {
+		t.Fatalf("completed document = %#v, id = %s; want OCR result parked for review", q.complete, q.completeID)
+	}
+	if q.created.ProjectID != doc.ProjectID || len(q.inserted.Descriptions) != 0 || len(q.emitted) != 0 {
+		t.Fatalf("archived project created a draft side effect: transaction=%#v items=%#v events=%#v", q.created, q.inserted, q.emitted)
+	}
+}
+
 func TestHandleLowConfidenceTotalParksForReviewWithoutDraft(t *testing.T) {
 	q := &fakeQuerier{claimRows: 1, doc: pendingDoc(nil)}
 	msg := envelope(receipt(FieldStatusLowConfidence), nil)
@@ -272,6 +293,29 @@ func TestHandleAttachAppendsToExistingDraft(t *testing.T) {
 	}
 	if len(q.emitted) != 1 || q.emitted[0].EventType != EventTransactionUpdated {
 		t.Fatalf("expected one transaction.updated, got %d", len(q.emitted))
+	}
+}
+
+func TestHandleOCRAppendOverflowParksDocumentForReview(t *testing.T) {
+	txID := uuid.Must(uuid.NewV7())
+	q := &fakeQuerier{
+		claimRows: 1, doc: pendingDoc(&txID), lockedTotalAmount: 9223372036854775807,
+	}
+	r := receipt(FieldStatusExtracted)
+	r.Fields[2].Amount = 1
+	msg := envelope(r, nil)
+	msg.ExternalRef = q.doc.ID
+	if err := newTestService(q).Handle(context.Background(), msg); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if q.complete.OcrStatus != constant.OCRStatusNeedsReview {
+		t.Fatalf("OCR status = %q, want needs_review", q.complete.OcrStatus)
+	}
+	if len(q.inserted.Amounts) != 0 || len(q.emitted) != 0 {
+		t.Fatal("overflowing OCR item must not change the draft or emit a transaction event")
+	}
+	if q.attached.OcrStatus != "" {
+		t.Fatal("overflowing OCR item must not be marked completed")
 	}
 }
 
